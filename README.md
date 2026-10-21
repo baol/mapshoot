@@ -1,0 +1,194 @@
+# mapshoot
+
+Native Web Mercator map images from HERE, OpenStreetMap, CARTO, or XYZ PNG
+tiles, with GeoJSON overlays. Rust CLI and library, rendered on the CPU with
+tiny-skia.
+
+![Berlin Mitte in four basemap styles with the same GeoJSON overlay](docs/berlin-basemaps.png)
+
+```sh
+export MAPSHOOT_HERE_API_KEY='your-key'   # HERE_API_KEY also works
+mapshoot --center 13.405,52.52 --radius 2600 --width 800 --height 450 \
+  --basemap here --here-style explore.day \
+  --geojson examples/berlin.geojson --style examples/berlin-style.json \
+  --output berlin-here.png
+
+mapshoot --center 13.405,52.52 --radius 2600 --width 800 --height 450 \
+  --basemap osm \
+  --geojson examples/berlin.geojson --style examples/berlin-style.json \
+  --output berlin-osm.png
+```
+
+## Build
+
+```sh
+cargo build --release --locked
+./target/release/mapshoot --help
+cargo install --path . --locked   # installs into ~/.cargo/bin
+```
+
+Rust 1.85+ (2024 edition) and a C toolchain are needed to build. Dependencies:
+tiny-skia, ureq (rustls), serde, serde_json, font8x8.
+
+## CLI
+
+```sh
+# Center and radius, with an overlay:
+mapshoot --center 13.405,52.52 --radius 1500 \
+  --geojson examples/overlay.geojson --style examples/style.json \
+  --output berlin.png
+
+# Bbox, OpenStreetMap:
+mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap osm --output berlin-osm.png
+
+# CARTO (free key: https://carto.com/basemaps/apikey):
+export MAPSHOOT_CARTO_API_KEY='your-key'  # CARTO_API_KEY also works
+mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap carto --output carto.png
+
+# XYZ:
+mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap xyz \
+  --tile-url 'https://tiles.example.com/{z}/{x}/{y}.png' \
+  --attribution '(c) Example Maps' --output tiles.png
+
+# Offline overlay, or PNG on stdout:
+mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap none \
+  --geojson examples/overlay.geojson -o - > overlay.png
+```
+
+### Basemaps
+
+| `--basemap` | Provider | Keys (first non-empty) | Style flag |
+|---|---|---|---|
+| `here` (default) | HERE | `MAPSHOOT_HERE_API_KEY`, `HERE_API_KEY` | `--here-style`, default `explore.day` |
+| `osm` | OpenStreetMap | none | none |
+| `carto` | CARTO | `MAPSHOOT_CARTO_API_KEY`, `CARTO_API_KEY` | `--carto-style`, default `voyager` |
+| `xyz` | any HTTP(S) XYZ provider | in `--tile-url` | none |
+| `none` | no tiles | none | none |
+
+HERE styles: `explore.day`, `explore.night`, `explore.satellite.day`, `lite.day`,
+`lite.night`, `lite.satellite.day`, `logistics.day`, `logistics.night`,
+`logistics.satellite.day`, `satellite.day`, `topo.day`, `topo.night`, `dem`.
+
+CARTO styles: `voyager`, `voyager_nolabels`, `voyager_labels_under`, `light_all`,
+`light_nolabels`, `dark_all`, `dark_nolabels`.
+
+The `MAPSHOOT_*` key takes precedence over the unprefixed name. A missing or
+empty key is an error. OSM uses `tile.openstreetmap.org`, 256 px tiles, and
+defaults to `--max-zoom 19` and `--concurrency 2`; it caches no tiles and fetches
+only those used by the render. CARTO uses 256 px tiles and permits
+`--max-zoom` up to 20. OSM and CARTO reject `--tile-size 512`; `here`, `xyz`, and
+`none` accept it. `--basemap none` renders overlays on a `#dddddd` background and
+warns on stderr.
+
+HERE, OSM, and CARTO draw an attribution footer. XYZ requires `--attribution`:
+printable ASCII, validated to fit the image. Requests use
+`mapshoot/<version>` as `User-Agent`; `Renderer::with_agent` accepts a custom
+`ureq::Agent`.
+
+### Coordinates and framing
+
+Coordinates are longitude, latitude; a bbox is west, south, east, north. Bbox
+longitudes span -180..180 and latitudes -85.05112878..85.05112878; the whole
+world is `-180,-85.05112878,180,85.05112878`. `west > east` crosses the
+antimeridian. `--center`/`--radius` builds a spherical box that wraps in longitude
+and clamps at the Mercator limit; radius is 0 < r <= 1,000,000 meters.
+
+The bbox fills the image. Height follows the box aspect ratio in Web Mercator
+unless `--height` or `--aspect-ratio` fixes the frame, in which case the box is
+fitted inside, centered. `--buffer` grows the box on every side before framing.
+
+Tiles render at zoom `ceil(log2(scale / tile_size))`, capped at `--max-zoom`;
+device scale 1 uses nearest filtering, every other scale uses bicubic. Tile
+columns wrap at the world edge, and overlays project into the same space.
+
+| Option | Default / meaning |
+|---|---|
+| `--output`, `-o` | Required `.png` path or `-` for stdout |
+| `--width` | 1024 pixels; 1..8192 |
+| `--height` | follows the box aspect; explicit height fits the box inside |
+| `--aspect-ratio` | `W:H` or a number; fixes the frame |
+| `--pixel-ratio` | 1; allowed 1..4; multiplies output dimensions |
+| `--buffer` | 0 meters; 0..1,000,000 |
+| `--max-zoom` | 20; 0..22 (OSM 19, CARTO 20) |
+| `--tile-size` | 256; 256 or 512 |
+| `--concurrency` | 8; 1..32 (OSM 2) |
+| `--timeout` | 15000 ms; 1..300000, covers the tile download phase |
+| `--tile-url` | XYZ only; HTTP(S) URL with `{z}`, `{x}`, `{y}` |
+| `--attribution` | XYZ only; required plain printable ASCII |
+| `--geojson`, `--style` | Overlay data and style file |
+
+Logical width and height are 1..8192, and width × height × `--pixel-ratio`² must
+not exceed 64 megapixels. A render uses at most 2048 tile placements and 8 MiB
+per tile; tiles must be valid PNGs matching `--tile-size`. Rendering and PNG
+encoding finish before a temporary file is written and renamed over `--output`,
+so failures leave an existing file intact; the output directory must exist. Tile
+errors report coordinates, not URLs. Exit status is 1 on error, and `-o -` treats
+a broken pipe as success.
+
+### GeoJSON and styling
+
+Accepts Feature, FeatureCollection, GeometryCollection, Point, LineString,
+Polygon, and their Multi variants; null geometries and empty collections are
+allowed. Polygon rings must be closed; holes fill with even-odd. Points draw as
+circles, lines with round caps and joins, all antialiased and clipped to the
+image.
+
+`--style` is a JSON object:
+
+```json
+{
+  "color": "#e63946",
+  "fillColor": "#e63946",
+  "weight": 3,
+  "opacity": 1,
+  "fillOpacity": 0.25,
+  "radius": 6
+}
+```
+
+Colors are `#RRGGBB`, opacities 0..1, widths and radii in logical pixels.
+Defaults: `#3388ff`, weight 3, opacity 1, fillOpacity 0.2, radius 6;
+`fillColor` falls back to `color`. Unknown fields are errors. One style applies
+to all features.
+
+## Library
+
+```rust
+use mapshoot::{Basemap, Bounds, Options, Renderer};
+
+let mut options = Options::new(
+    Bounds::from_center(13.405, 52.52, 1500.0)?,
+    Basemap::Here { api_key: "your-key".into(), style: "explore.day".into() },
+);
+options.geojson = Some(serde_json::from_str(
+    r#"{"type":"Point","coordinates":[13.405,52.52]}"#,
+)?);
+let image = Renderer::default().render(&options)?;
+image.save_png("berlin.png")?;
+```
+
+`mapshoot::render(&options)` is the one-shot form; `Renderer` reuses HTTP
+connections. `Basemap` also has `None`, `Osm`, `Carto { api_key, style }`, and
+`Xyz { url, attribution }`; styles are listed in `HERE_STYLES` and
+`CARTO_STYLES`. `height` is `Option<u32>`: `None` follows the bbox aspect,
+`Some(h)` fits the box inside.
+`Bounds` provides `new`, `from_center`, `buffered`, and `aspect`. Errors carry
+`kind()` — `InvalidInput`, `Http(u16)`, `Network`, `Timeout`, `Other` — and
+`Debug` output redacts keys and tile URLs.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+```
+
+CI runs these on stable Rust (`.github/workflows/ci.yml`). Tests use local HTTP
+fixtures.
+
+## License
+
+Dual licensed under Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT
+([LICENSE-MIT](LICENSE-MIT)), at your option. The embedded 8x8 bitmap font comes
+from the `font8x8` crate (MIT).
