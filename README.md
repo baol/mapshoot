@@ -28,8 +28,8 @@ if a fully static Linux executable is required.
 
 ## CLI
 
-For a complete map, use HERE (the default), OSM, or CARTO, or XYZ with a
-provider URL. HERE and CARTO need an API key; OSM does not.
+For a complete map, use HERE (the default), OSM, CARTO, or XYZ with a provider
+URL. HERE and CARTO need an API key; OSM does not.
 **`--basemap none` deliberately produces no basemap**; it is only for offline
 overlay rendering and emits a warning on stderr.
 
@@ -52,8 +52,8 @@ mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap carto \
 # Any XYZ provider:
 mapshoot --bbox 13.37,52.50,13.44,52.54 \
   --basemap xyz \
-  --tile-url 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' \
-  --attribution '(c) OpenStreetMap contributors' \
+  --tile-url 'https://tiles.example.com/{z}/{x}/{y}.png' \
+  --attribution '(c) Example Maps' \
   --output berlin.png
 
 # Offline, with no tile requests:
@@ -70,7 +70,7 @@ mapshoot --center 13.405,52.52 --radius 1500 --basemap none -o - > map.png
 
 ### Basemaps and keys
 
-| `--basemap` | Provider | Key variables (first match wins) | Style flag |
+| `--basemap` | Provider | Key variables (first non-empty) | Style flag |
 |---|---|---|---|
 | `here` (default) | HERE | `MAPSHOOT_HERE_API_KEY`, then `HERE_API_KEY` | `--here-style`, default `explore.day` |
 | `osm` | OpenStreetMap | none | none |
@@ -79,9 +79,9 @@ mapshoot --center 13.405,52.52 --radius 1500 --basemap none -o - > map.png
 | `none` | No tiles | none | none |
 
 The `MAPSHOOT_*` variable takes precedence over the unprefixed legacy name.
-A missing or empty key is an error, not a silent fallback. The `osm` and
-`carto` presets serve 256 px tiles; use `--tile-size 512` only with `here` or
-`xyz`.
+If neither variable is set, or both are empty, the key is an error rather than
+a silent fallback. The `osm` and `carto` presets serve 256 px tiles; use
+`--tile-size 512` only with `here` or `xyz`.
 
 Coordinates always use **longitude, latitude**; bbox uses **west, south, east,
 north**. Radius is in meters, using a spherical Earth bounding box. A bbox with
@@ -121,9 +121,9 @@ wraps at the world edge.
 | `--height` | follows the box aspect; an explicit value fits the box inside |
 | `--aspect-ratio` | `W:H` or a number; fixes the frame and fits the box inside |
 | `--pixel-ratio` | Integer 1..4; scales dimensions and overlays, not tile detail |
-| `--max-zoom` | 20; allowed 0..22, set to provider's supported maximum |
+| `--max-zoom` | 20; allowed 0..22, with preset limits `osm` 19 and `carto` 20 |
 | `--tile-size` | 256; accepts 256 or 512, must match returned tile dimensions; `osm` and `carto` are 256 only |
-| `--concurrency` | 8 parallel tile requests; allowed 1..32 |
+| `--concurrency` | 8; allowed 1..32, with the `osm` preset defaulting to and limited to 2 |
 | `--timeout` | 15000 ms total deadline for the tile download phase |
 | `--output`, `-o` | Required `.png` path or `-` for stdout |
 
@@ -178,12 +178,14 @@ A key is required; request a free one at
 
 `--basemap osm` uses the official `tile.openstreetmap.org` server and needs no
 key or style flag. Images carry the `(c) OpenStreetMap contributors` footer.
+The preset defaults to `--max-zoom 19`, the standard layer's maximum, and
+`--concurrency 2`; higher values for either option are rejected.
 
 The OSM tile usage policy forbids bulk and offline downloading. mapshoot keeps
 no persistent tile cache and fetches only the tiles used by the requested image.
-Use the OSM preset for one-off or interactive rendering with
-`--concurrency 2`, not for building tile archives or high-volume services. For
-those, self-host or use `--basemap xyz` with a provider that permits it.
+Use the OSM preset for one-off or interactive rendering, not for building tile
+archives or high-volume services. For those, self-host or use `--basemap xyz`
+with a provider that permits it.
 
 ### XYZ
 

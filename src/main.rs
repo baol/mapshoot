@@ -19,11 +19,11 @@ Basemap:
   --tile-url URL            XYZ only: HTTP(S) PNG template with {z}, {x}, {y}
   --attribution TEXT        XYZ only: required, printable ASCII, not HTML
   --tile-size N             256 or 512 (default: 256); osm/carto are 256 only
-  HERE key:  MAPSHOOT_HERE_API_KEY  (legacy: HERE_API_KEY)
-  CARTO key: MAPSHOOT_CARTO_API_KEY (legacy: CARTO_API_KEY)
+  HERE key:  MAPSHOOT_HERE_API_KEY  (preferred; legacy HERE_API_KEY)
+  CARTO key: MAPSHOOT_CARTO_API_KEY (preferred; legacy CARTO_API_KEY)
              free key at https://carto.com/basemaps/apikey
-  OSM needs no key; use --concurrency 2 and avoid bulk/offline downloads.
-  XYZ credentials belong in --tile-url.
+  OSM: no key; defaults to --max-zoom 19 and --concurrency 2.
+  Avoid bulk/offline downloads. XYZ credentials belong in --tile-url.
 
   HERE styles: explore.day, explore.night, explore.satellite.day, lite.day,
     lite.night, lite.satellite.day, logistics.day, logistics.night,
@@ -42,8 +42,8 @@ Image:
   --height N                Image height (default: follows the box aspect)
   --aspect-ratio W:H|N      Frame shape; the box is fitted inside
   --pixel-ratio N           Integer output scale 1..4 (default: 1)
-  --max-zoom N              Highest tile zoom 0..22 (default: 20)
-  --concurrency N           Parallel downloads 1..32 (default: 8)
+  --max-zoom N              Highest tile zoom 0..22 (default: 20; osm 19, carto 20)
+  --concurrency N           Parallel downloads 1..32 (default: 8; osm 2)
   --timeout N               Total download deadline in ms (default: 15000)
 
 Overlay and output:
@@ -171,11 +171,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let bounds = bounds
         .buffered(buffer)
         .map_err(|err| format!("--buffer: {err}"))?;
-    let basemap = match values
+    let basemap_name = values
         .get("--basemap")
         .map(String::as_str)
-        .unwrap_or("here")
+        .unwrap_or("here");
+    if !["here", "osm", "carto", "xyz", "none"].contains(&basemap_name) {
+        return Err("--basemap must be here, osm, carto, xyz or none".into());
+    }
+    if basemap_name != "here" && values.contains_key("--here-style") {
+        return Err("--here-style requires --basemap here".into());
+    }
+    if basemap_name != "carto" && values.contains_key("--carto-style") {
+        return Err("--carto-style requires --basemap carto".into());
+    }
+    if basemap_name != "xyz"
+        && (values.contains_key("--tile-url") || values.contains_key("--attribution"))
     {
+        return Err("--tile-url and --attribution require --basemap xyz".into());
+    }
+    let basemap = match basemap_name {
         "none" => Basemap::None,
         "here" => Basemap::Here {
             api_key: provider_key("HERE")?,
@@ -204,17 +218,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         _ => return Err("--basemap must be here, osm, carto, xyz or none".into()),
     };
-    if !matches!(basemap, Basemap::Here { .. }) && values.contains_key("--here-style") {
-        return Err("--here-style requires --basemap here".into());
-    }
-    if !matches!(basemap, Basemap::Carto { .. }) && values.contains_key("--carto-style") {
-        return Err("--carto-style requires --basemap carto".into());
-    }
-    if !matches!(basemap, Basemap::Xyz { .. })
-        && (values.contains_key("--tile-url") || values.contains_key("--attribution"))
-    {
-        return Err("--tile-url and --attribution require --basemap xyz".into());
-    }
     let mut options = Options::new(bounds, basemap);
     macro_rules! number {
         ($flag:literal, $field:ident) => {
@@ -310,8 +313,9 @@ fn provider_key(provider: &str) -> Result<String, Box<dyn std::error::Error>> {
     let legacy = format!("{provider}_API_KEY");
     for name in [&prefixed, &legacy] {
         if let Ok(value) = std::env::var(name) {
-            if !value.trim().is_empty() {
-                return Ok(value);
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(value.to_string());
             }
         }
     }

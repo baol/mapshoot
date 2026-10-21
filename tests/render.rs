@@ -195,7 +195,16 @@ fn invalid_options_are_errors() {
     cases.push(o);
     let mut o = options();
     o.basemap = Basemap::Osm;
+    o.max_zoom = 19;
     o.tile_size = 512;
+    cases.push(o);
+    let mut o = options();
+    o.basemap = Basemap::Osm;
+    cases.push(o);
+    let mut o = options();
+    o.basemap = Basemap::Osm;
+    o.max_zoom = 19;
+    o.concurrency = 8;
     cases.push(o);
     let mut o = options();
     o.basemap = Basemap::Carto {
@@ -215,6 +224,13 @@ fn invalid_options_are_errors() {
         style: "voyager".into(),
     };
     o.tile_size = 512;
+    cases.push(o);
+    let mut o = options();
+    o.basemap = Basemap::Carto {
+        api_key: "secret".into(),
+        style: "voyager".into(),
+    };
+    o.max_zoom = 21;
     cases.push(o);
     let mut o = options();
     o.basemap = Basemap::Xyz {
@@ -720,6 +736,8 @@ fn cli_help_validation_and_png_stdout() {
     assert!(help_text.contains("MAPSHOOT_HERE_API_KEY"), "{help_text}");
     assert!(help_text.contains("voyager_labels_under"), "{help_text}");
     assert!(help_text.contains("logistics.satellite.day"), "{help_text}");
+    assert!(help_text.contains("osm 19"), "{help_text}");
+    assert!(help_text.contains("osm 2"), "{help_text}");
     for args in [
         vec!["--bogus"],
         vec!["--bbox", "0,,1,1", "-o", "-", "--basemap", "none"],
@@ -916,6 +934,88 @@ fn cli_carto_requires_a_key_and_validates_styles_and_flags() {
     let message = String::from_utf8_lossy(&result.stderr);
     assert!(
         message.contains("OSM preset serves 256 px tiles"),
+        "{message}"
+    );
+
+    // Flag compatibility is checked before provider keys, so a missing CARTO
+    // key must not mask the invalid --here-style.
+    let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+        .env_remove("CARTO_API_KEY")
+        .env_remove("MAPSHOOT_CARTO_API_KEY")
+        .args([
+            "--bbox",
+            "13.37,52.50,13.44,52.54",
+            "--basemap",
+            "carto",
+            "--here-style",
+            "explore.day",
+            "-o",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("--here-style requires --basemap here"),
+        "{message}"
+    );
+    assert!(!message.contains("MAPSHOOT_CARTO_API_KEY"), "{message}");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+        .env_remove("CARTO_API_KEY")
+        .env_remove("MAPSHOOT_CARTO_API_KEY")
+        .args([
+            "--bbox",
+            "13.37,52.50,13.44,52.54",
+            "--basemap",
+            "carto",
+            "--tile-url",
+            "https://example.com/{z}/{x}/{y}.png",
+            "-o",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("require --basemap xyz"), "{message}");
+    assert!(!message.contains("MAPSHOOT_CARTO_API_KEY"), "{message}");
+}
+
+#[test]
+fn cli_osm_rejects_zoom_and_concurrency_above_provider_limits() {
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "osm",
+        "--max-zoom",
+        "20",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("max-zoom must be 0..19 for the OSM basemap"),
+        "{message}"
+    );
+
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "osm",
+        "--concurrency",
+        "8",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("concurrency must be 1..2 for the OSM basemap"),
         "{message}"
     );
 }

@@ -276,11 +276,44 @@ impl fmt::Debug for Basemap {
 }
 
 impl Basemap {
+    /// Provider name used in diagnostics.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Here { .. } => "HERE",
+            Self::Osm => "OSM",
+            Self::Carto { .. } => "CARTO",
+            Self::Xyz { .. } => "XYZ",
+        }
+    }
+
+    /// Highest zoom the preset's provider serves, when known.
+    ///
+    /// `None` means the caller or the XYZ provider decides.
+    pub fn max_zoom(&self) -> Option<u8> {
+        match self {
+            Self::Osm => Some(19),
+            Self::Carto { .. } => Some(20),
+            _ => None,
+        }
+    }
+
+    /// Maximum parallel requests the preset's provider permits.
+    ///
+    /// The OSM tile usage policy asks clients to use at most two connections.
+    pub fn max_concurrency(&self) -> usize {
+        match self {
+            Self::Osm => 2,
+            _ => 32,
+        }
+    }
+
     fn source(&self, tile_size: u32) -> Result<Option<(String, String)>> {
         match self {
             Self::None => Ok(None),
             Self::Here { api_key, style } => {
-                if api_key.trim().is_empty() {
+                let api_key = api_key.trim();
+                if api_key.is_empty() {
                     return Err(error("HERE API key is empty"));
                 }
                 if !HERE_STYLES.contains(&style.as_str()) {
@@ -297,7 +330,7 @@ impl Basemap {
             Self::Osm => {
                 if tile_size != 256 {
                     return Err(error(
-                        "the OSM preset serves 256 px tiles; use --tile-size 256 or --basemap xyz",
+                        "the OSM preset serves 256 px tiles; use --tile-size 256 or --basemap here/xyz",
                     ));
                 }
                 Ok(Some((
@@ -306,7 +339,8 @@ impl Basemap {
                 )))
             }
             Self::Carto { api_key, style } => {
-                if api_key.trim().is_empty() {
+                let api_key = api_key.trim();
+                if api_key.is_empty() {
                     return Err(error("CARTO API key is empty"));
                 }
                 if !CARTO_STYLES.contains(&style.as_str()) {
@@ -317,7 +351,7 @@ impl Basemap {
                 }
                 if tile_size != 256 {
                     return Err(error(
-                        "the CARTO preset serves 256 px tiles; use --tile-size 256 or --basemap xyz",
+                        "the CARTO preset serves 256 px tiles; use --tile-size 256 or --basemap here/xyz",
                     ));
                 }
                 let key = encode_query_value(api_key);
@@ -440,13 +474,13 @@ impl Options {
     pub fn new(bounds: Bounds, basemap: Basemap) -> Self {
         Self {
             bounds,
+            max_zoom: basemap.max_zoom().unwrap_or(20),
+            concurrency: 8.min(basemap.max_concurrency()),
             basemap,
             width: 1024,
             height: None,
             pixel_ratio: 1,
-            max_zoom: 20,
             tile_size: 256,
-            concurrency: 8,
             timeout: Duration::from_secs(15),
             geojson: None,
             style: Style::default(),
@@ -461,8 +495,20 @@ impl Options {
         if self.max_zoom > 22 || ![256, 512].contains(&self.tile_size) {
             return Err(error("max-zoom must be 0..22 and tile-size 256 or 512"));
         }
-        if !(1..=32).contains(&self.concurrency) {
-            return Err(error("concurrency must be 1..32"));
+        if let Some(max_zoom) = self.basemap.max_zoom() {
+            if self.max_zoom > max_zoom {
+                return Err(error(format!(
+                    "max-zoom must be 0..{max_zoom} for the {} basemap",
+                    self.basemap.name()
+                )));
+            }
+        }
+        let max_concurrency = self.basemap.max_concurrency();
+        if !(1..=max_concurrency).contains(&self.concurrency) {
+            return Err(error(format!(
+                "concurrency must be 1..{max_concurrency} for the {} basemap",
+                self.basemap.name()
+            )));
         }
         if self.timeout.is_zero() || self.timeout > Duration::from_secs(300) {
             return Err(error("timeout must be 1..300000 milliseconds"));
@@ -634,13 +680,10 @@ impl Renderer {
         image.fill(Color::from_rgba8(221, 221, 221, 255));
         if let Some((url, attribution)) = source {
             tiles::compose(&self.agent, &mut image, &viewport, options, &url).map_err(|err| {
-                let provider = match options.basemap {
-                    Basemap::Here { .. } => "HERE",
-                    Basemap::Osm => "OSM",
-                    Basemap::Carto { .. } => "CARTO",
-                    _ => "XYZ",
-                };
-                Error::new(err.kind(), format!("{provider} basemap failed: {err}"))
+                Error::new(
+                    err.kind(),
+                    format!("{} basemap failed: {err}", options.basemap.name()),
+                )
             })?;
             geojson::draw(
                 &mut image,
@@ -743,5 +786,47 @@ mod tests {
         );
         assert!(!debug.contains("TOPSECRET"), "{debug}");
         assert_eq!(format!("{:?}", Basemap::Osm), "Osm");
+    }
+
+    #[test]
+    fn presets_apply_provider_zoom_and_concurrency_limits() {
+        let bounds = Bounds::new(0.0, 0.0, 1.0, 1.0).unwrap();
+        let osm = Options::new(bounds, Basemap::Osm);
+        assert_eq!(osm.max_zoom, 19);
+        assert_eq!(osm.concurrency, 2);
+        let carto = Options::new(
+            bounds,
+            Basemap::Carto {
+                api_key: "key".into(),
+                style: "voyager".into(),
+            },
+        );
+        assert_eq!(carto.max_zoom, 20);
+        assert_eq!(carto.concurrency, 8);
+        let here = Options::new(
+            bounds,
+            Basemap::Here {
+                api_key: "key".into(),
+                style: "explore.day".into(),
+            },
+        );
+        assert_eq!(here.max_zoom, 20);
+        assert_eq!(here.concurrency, 8);
+    }
+
+    #[test]
+    fn provider_keys_are_trimmed_before_encoding() {
+        let carto = Basemap::Carto {
+            api_key: " key \n".into(),
+            style: "voyager".into(),
+        };
+        let (url, _) = carto.source(256).unwrap().unwrap();
+        assert!(url.ends_with("?key=key"), "{url}");
+        let here = Basemap::Here {
+            api_key: " key \n".into(),
+            style: "explore.day".into(),
+        };
+        let (url, _) = here.source(256).unwrap().unwrap();
+        assert!(url.contains("apiKey=key&style=explore.day"), "{url}");
     }
 }
