@@ -2,7 +2,11 @@
 name = "mapshoot"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Native HERE/XYZ raster map rendering with GeoJSON overlays"
+readme = "README.md"
+keywords = ["map", "static-map", "geojson", "tiles", "png"]
+categories = ["command-line-utilities", "graphics", "multimedia::images"]
 
 [dependencies]
 font8x8 = "0.3"

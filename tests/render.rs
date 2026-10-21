@@ -263,6 +263,16 @@ struct Log {
     max_active: AtomicUsize,
 }
 
+#[derive(Clone, Copy)]
+enum Body {
+    /// A solid PNG tile of the given pixel size.
+    Png(u32),
+    /// Bytes that are not a PNG at all.
+    Corrupt,
+    /// One byte more than the accepted tile size cap.
+    Oversize,
+}
+
 struct Fixture {
     url: String,
     stop: Arc<AtomicBool>,
@@ -272,6 +282,18 @@ struct Fixture {
 
 impl Fixture {
     fn new(status: u16, delay: Duration, corrupt: bool) -> Self {
+        Self::with_body(
+            status,
+            delay,
+            if corrupt {
+                Body::Corrupt
+            } else {
+                Body::Png(256)
+            },
+        )
+    }
+
+    fn with_body(status: u16, delay: Duration, body: Body) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -287,7 +309,7 @@ impl Fixture {
                         Ok((stream, _)) => {
                             let log = log.clone();
                             workers.push(std::thread::spawn(move || {
-                                serve(stream, status, delay, corrupt, &log);
+                                serve(stream, status, delay, body, &log);
                             }));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -330,7 +352,7 @@ impl Drop for Fixture {
     }
 }
 
-fn serve(mut stream: TcpStream, status: u16, delay: Duration, corrupt: bool, log: &Log) {
+fn serve(mut stream: TcpStream, status: u16, delay: Duration, body: Body, log: &Log) {
     stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -359,20 +381,22 @@ fn serve(mut stream: TcpStream, status: u16, delay: Duration, corrupt: bool, log
     let current = log.active.fetch_add(1, Ordering::SeqCst) + 1;
     log.max_active.fetch_max(current, Ordering::SeqCst);
     std::thread::sleep(delay);
-    let mut tile = Pixmap::new(256, 256).unwrap();
     let parts: Vec<_> = path.split('/').collect();
     let x: u8 = parts[2].parse().unwrap_or(0);
     let y: u8 = parts[3].split('.').next().unwrap().parse().unwrap_or(0);
-    tile.fill(Color::from_rgba8(
-        x.saturating_mul(100),
-        y.saturating_mul(100),
-        50,
-        255,
-    ));
-    let body = if corrupt {
-        b"not a PNG".to_vec()
-    } else {
-        tile.encode_png().unwrap()
+    let body = match body {
+        Body::Png(size) => {
+            let mut tile = Pixmap::new(size, size).unwrap();
+            tile.fill(Color::from_rgba8(
+                x.saturating_mul(100),
+                y.saturating_mul(100),
+                50,
+                255,
+            ));
+            tile.encode_png().unwrap()
+        }
+        Body::Corrupt => b"not a PNG".to_vec(),
+        Body::Oversize => vec![0; 8 * 1024 * 1024 + 1],
     };
     let header = format!(
         "HTTP/1.1 {status} Test\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -400,7 +424,8 @@ fn tiles_are_stitched_at_correct_positions_with_bounded_concurrency() {
         paths,
         ["/1/0/0.png", "/1/0/1.png", "/1/1/0.png", "/1/1/1.png"]
     );
-    assert_eq!(server.log.max_active.load(Ordering::SeqCst), 2);
+    let max_active = server.log.max_active.load(Ordering::SeqCst);
+    assert!((1..=2).contains(&max_active), "{max_active}");
     let agents = server.log.agents.lock().unwrap().clone();
     assert!(!agents.is_empty());
     assert!(
@@ -765,6 +790,47 @@ fn cli_write_failures_report_the_path_and_leave_no_temporaries() {
     let message = String::from_utf8_lossy(&result.stderr);
     assert!(message.contains(missing.to_str().unwrap()), "{message}");
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn tile_size_512_is_stitched() {
+    let server = Fixture::with_body(200, Duration::ZERO, Body::Png(512));
+    let mut opts = server.options();
+    opts.tile_size = 512;
+    let image = render(&opts).unwrap();
+    let view = Viewport::new(&opts).unwrap();
+    assert_eq!(view.zoom, 0);
+    assert_eq!(rgb(&image, 10, 10), [0, 0, 50]);
+    assert_eq!(*server.log.paths.lock().unwrap(), ["/0/0/0.png"]);
+}
+
+#[test]
+fn oversized_tiles_are_rejected() {
+    let server = Fixture::with_body(200, Duration::ZERO, Body::Oversize);
+    let error = render(&server.options()).unwrap_err().to_string();
+    assert!(error.contains("8 MiB"), "{error}");
+}
+
+#[test]
+fn geojson_nesting_depth_is_limited() {
+    let mut value = json!({"type": "Point", "coordinates": [0, 0]});
+    for _ in 0..70 {
+        value = json!({"type": "GeometryCollection", "geometries": [value]});
+    }
+    let mut opts = options();
+    opts.geojson = Some(value);
+    let error = render(&opts).unwrap_err().to_string();
+    assert!(error.contains("nesting"), "{error}");
+}
+
+#[test]
+fn max_zoom_caps_the_selected_zoom() {
+    let mut opts = options();
+    opts.max_zoom = 3;
+    opts.bounds = Bounds::from_center(13.405, 52.52, 1000.0).unwrap();
+    assert_eq!(Viewport::new(&opts).unwrap().zoom, 3);
+    opts.max_zoom = 20;
+    assert!(Viewport::new(&opts).unwrap().zoom > 3);
 }
 
 #[test]

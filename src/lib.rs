@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Native Web Mercator raster maps. No browser, GUI, or async runtime.
 mod geojson;
 mod tiles;

@@ -14,7 +14,8 @@ cargo install --path . --locked
 ```
 
 Rust and a platform C toolchain are build-time requirements; neither is needed
-to run the resulting binary. Five direct crates: tiny-skia (including PNG),
+to run the resulting binary. Rust 1.85 or newer is required (2024 edition).
+Five direct crates: tiny-skia (including PNG),
 ureq (HTTP/TLS), serde, serde_json, and font8x8 (attribution).
 **tiny-skia is pure Rust**, not a C++ Skia binding. HTTPS uses rustls with ring;
 ring includes C/assembly compiled into the binary. There is no C++ Skia build,
@@ -189,6 +190,8 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
+
+The same three commands run in CI on stable Rust (`.github/workflows/ci.yml`).
 
 Tests check projection, actual overlay pixels, polygon holes, alpha blending,
 GeoJSON validation, PNG round trips, tile placement/cropping, concurrency,

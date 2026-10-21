@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use mapshoot::{Basemap, Bounds, Options, Renderer, Style};
 use std::{
     collections::BTreeMap,
