@@ -74,7 +74,11 @@ pub(crate) fn error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidInput, message)
 }
 
-/// Coordinates are always longitude, latitude. Antimeridian crossing is rejected.
+/// Coordinates are always longitude, latitude.
+///
+/// `west > east` describes a box that crosses the antimeridian. Latitudes are
+/// limited to +/-90; the part of a box beyond the Web Mercator limit
+/// (+/-85.05112878) renders against the background color.
 #[derive(Clone, Copy, Debug)]
 pub struct Bounds {
     pub west: f64,
@@ -95,41 +99,71 @@ impl Bounds {
         Ok(bounds)
     }
 
+    /// Spherical box around a point. The box wraps across the antimeridian and
+    /// is clipped at the poles instead of being rejected.
     pub fn from_center(longitude: f64, latitude: f64, radius: f64) -> Result<Self> {
         coordinate(longitude, latitude)?;
         if !radius.is_finite() || radius <= 0.0 || radius > 1_000_000.0 {
             return Err(error("radius must be positive and at most 1000000 meters"));
         }
         let angle = radius / 6_371_008.8;
-        let lat = latitude.to_radians();
-        if lat.abs() + angle >= std::f64::consts::FRAC_PI_2 {
-            return Err(error("radius crosses a pole"));
-        }
         let dy = angle.to_degrees();
-        let dx = (angle.sin() / lat.cos()).asin().to_degrees();
-        Self::new(longitude - dx, latitude - dy, longitude + dx, latitude + dy)
+        // Web Mercator cannot show the poles: keep the box inside the
+        // renderable latitude range and let the renderer draw background there.
+        let center = latitude.clamp(-MAX_LATITUDE, MAX_LATITUDE);
+        let (west, east) = if latitude.abs() + dy >= 90.0 {
+            // A cap containing a pole spans every longitude.
+            (-180.0, 180.0)
+        } else {
+            let dx = (angle.sin() / latitude.to_radians().cos())
+                .asin()
+                .to_degrees();
+            (
+                wrap_longitude(longitude - dx),
+                wrap_longitude(longitude + dx),
+            )
+        };
+        Self::new(
+            west,
+            (center - dy).max(-90.0),
+            east,
+            (center + dy).min(90.0),
+        )
     }
 
     fn validate(self) -> Result<()> {
         coordinate(self.west, self.south)?;
         coordinate(self.east, self.north)?;
-        if self.west >= self.east || self.south >= self.north {
+        if self.west == self.east {
             return Err(error(
-                "bbox requires west < east and south < north; antimeridian crossing is unsupported",
+                "bbox requires west != east; use west > east for a box crossing the antimeridian",
             ));
+        }
+        if self.west > self.east && self.east - self.west + 360.0 <= 0.0 {
+            return Err(error(
+                "bbox spans no longitude; use -180,180 for a box covering the whole world",
+            ));
+        }
+        if self.south >= self.north {
+            return Err(error("bbox requires south < north"));
         }
         Ok(())
     }
+}
+
+/// Fold a longitude into -180..180.
+fn wrap_longitude(longitude: f64) -> f64 {
+    ((longitude + 180.0).rem_euclid(360.0)) - 180.0
 }
 
 pub(crate) fn coordinate(lon: f64, lat: f64) -> Result<()> {
     if !lon.is_finite()
         || !lat.is_finite()
         || !(-180.0..=180.0).contains(&lon)
-        || !(-MAX_LATITUDE..=MAX_LATITUDE).contains(&lat)
+        || !(-90.0..=90.0).contains(&lat)
     {
         return Err(error(
-            "coordinates must be finite: longitude -180..180, latitude -85.05112878..85.05112878",
+            "coordinates must be finite: longitude -180..180, latitude -90..90",
         ));
     }
     Ok(())
@@ -340,6 +374,8 @@ pub struct Viewport {
     pub world_size: f64,
     pub left: f64,
     pub top: f64,
+    /// Logical image width; used to pick the nearest world copy of a feature.
+    pub width: f64,
 }
 
 impl Viewport {
@@ -347,7 +383,11 @@ impl Viewport {
         options.validate()?;
         let b = options.bounds;
         let (west, north) = project(b.west, b.north, 1.0);
-        let (east, south) = project(b.east, b.south, 1.0);
+        let (mut east, south) = project(b.east, b.south, 1.0);
+        if b.west > b.east {
+            // A box crossing the antimeridian continues into the next world.
+            east += 1.0;
+        }
         let available_x = f64::from(options.width - options.padding * 2);
         let available_y = f64::from(options.height - options.padding * 2);
         let scale = (available_x / (east - west)).min(available_y / (south - north));
@@ -368,11 +408,17 @@ impl Viewport {
             world_size,
             left: ((west + east) * world_size / 2.0 - f64::from(options.width) / 2.0).floor(),
             top: ((north + south) * world_size / 2.0 - f64::from(options.height) / 2.0).floor(),
+            width: f64::from(options.width),
         })
     }
 
     pub fn point(&self, longitude: f64, latitude: f64, pixel_ratio: u32) -> (f32, f32) {
         let (x, y) = project(longitude, latitude, self.world_size);
+        // Use the copy of the world nearest the view center, so features on
+        // either side of the antimeridian land inside a wrapping view while
+        // ordinary off-screen features stay off screen.
+        let copies = ((self.left + self.width / 2.0 - x) / self.world_size).round();
+        let x = x + copies * self.world_size;
         (
             ((x - self.left) * f64::from(pixel_ratio)) as f32,
             ((y - self.top) * f64::from(pixel_ratio)) as f32,

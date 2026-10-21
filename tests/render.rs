@@ -33,21 +33,48 @@ fn bounds_radius_and_projection() {
     assert!((area.east - 0.0089932).abs() < 0.000001);
     assert!((area.north - 0.0089932).abs() < 0.000001);
     for b in [
-        [1.0, 0.0, -1.0, 1.0],
         [0.0, 0.0, 0.0, 1.0],
-        [0.0, 0.0, 1.0, 86.0],
+        [0.0, 1.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0, 91.0],
+        [0.0, 0.0, 181.0, 1.0],
+        [180.0, 0.0, -180.0, 1.0],
         [0.0, 0.0, f64::NAN, 1.0],
     ] {
-        assert!(Bounds::new(b[0], b[1], b[2], b[3]).is_err());
+        assert!(Bounds::new(b[0], b[1], b[2], b[3]).is_err(), "{b:?}");
     }
+    // Crossing the antimeridian and reaching a pole are ordinary requests.
+    let crossing = Bounds::new(179.0, -1.0, -179.0, 1.0).unwrap();
+    assert!(crossing.west > crossing.east);
+    let whole = Bounds::new(-180.0, -1.0, 180.0, 1.0).unwrap();
+    let mut whole_opts = options();
+    whole_opts.bounds = whole;
+    whole_opts.width = 512;
+    whole_opts.height = 512;
+    whole_opts.padding = 0;
+    let whole_view = Viewport::new(&whole_opts).unwrap();
+    assert_eq!((whole_view.zoom, whole_view.world_size), (1, 512.0));
+    assert!(Bounds::new(0.0, 0.0, 1.0, 86.0).is_ok());
     for (lon, lat, radius) in [
         (0.0, 0.0, -1.0),
-        (180.0, 0.0, 1000.0),
-        (0.0, 85.0, 1e6),
         (0.0, 0.0, f64::INFINITY),
+        (0.0, 0.0, 2e6),
+        (0.0, 91.0, 1000.0),
+        (181.0, 0.0, 1000.0),
     ] {
-        assert!(Bounds::from_center(lon, lat, radius).is_err());
+        assert!(
+            Bounds::from_center(lon, lat, radius).is_err(),
+            "{lon},{lat}"
+        );
     }
+    let wrapped = Bounds::from_center(179.99, 0.0, 10_000.0).unwrap();
+    assert!(wrapped.west > wrapped.east, "{wrapped:?}");
+    let polar = Bounds::from_center(0.0, 89.0, 10_000.0).unwrap();
+    assert!(
+        polar.north > MAX_LATITUDE && polar.north <= 90.0,
+        "{polar:?}"
+    );
+    let cap = Bounds::from_center(0.0, 85.0, 1_000_000.0).unwrap();
+    assert_eq!((cap.west, cap.east), (-180.0, 180.0));
     let opts = options();
     let view = Viewport::new(&opts).unwrap();
     let center = view.point(0.0, 0.0, 1);
@@ -240,7 +267,7 @@ fn malformed_geojson_is_not_silently_ignored() {
         json!({"type":"Feature"}),
         json!({"type":"FeatureCollection","features":[null]}),
         json!({"type":"Point","coordinates":[0]}),
-        json!({"type":"Point","coordinates":[0,90]}),
+        json!({"type":"Point","coordinates":[0,91]}),
         json!({"type":"Point","coordinates":[0,0,"bad"]}),
         json!({"type":"LineString","coordinates":[[0,0]]}),
         json!({"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,1]]]}),
@@ -831,6 +858,89 @@ fn max_zoom_caps_the_selected_zoom() {
     assert_eq!(Viewport::new(&opts).unwrap().zoom, 3);
     opts.max_zoom = 20;
     assert!(Viewport::new(&opts).unwrap().zoom > 3);
+}
+
+#[test]
+fn antimeridian_crossing_views_wrap_tiles_and_overlays() {
+    let server = Fixture::new(200, Duration::ZERO, false);
+    let mut opts = server.options();
+    opts.bounds = Bounds::new(170.0, -5.0, -170.0, 5.0).unwrap();
+    opts.geojson = Some(json!({
+        "type": "MultiPoint",
+        "coordinates": [[179.5, 0.0], [-179.5, 0.0]]
+    }));
+    opts.style = Style {
+        color: "#ff0000".into(),
+        fill_opacity: 1.0,
+        weight: 0.0,
+        ..Style::default()
+    };
+    let view = Viewport::new(&opts).unwrap();
+    assert_eq!(view.zoom, 5);
+    let east = view.point(179.5, 0.0, 1);
+    let west = view.point(-179.5, 0.0, 1);
+    assert!((east.0 - 245.0).abs() < 2.0, "{east:?}");
+    assert!((west.0 - 267.0).abs() < 2.0, "{west:?}");
+    let image = render(&opts).unwrap();
+    assert_eq!(rgb(&image, east.0 as u32, east.1 as u32), [255, 0, 0]);
+    assert_eq!(rgb(&image, west.0 as u32, west.1 as u32), [255, 0, 0]);
+    let paths = server.log.paths.lock().unwrap().clone();
+    assert!(paths.iter().any(|p| p.starts_with("/5/31/")), "{paths:?}");
+    assert!(paths.iter().any(|p| p.starts_with("/5/0/")), "{paths:?}");
+}
+
+#[test]
+fn polar_views_clip_to_the_mercator_edge() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-10.0, 80.0, 10.0, 89.0).unwrap();
+    opts.geojson = Some(json!({"type": "Point", "coordinates": [0.0, 89.5]}));
+    opts.style = Style {
+        color: "#ff0000".into(),
+        fill_opacity: 1.0,
+        weight: 0.0,
+        ..Style::default()
+    };
+    let view = Viewport::new(&opts).unwrap();
+    // Every latitude at or beyond the Web Mercator limit maps to the world top.
+    assert_eq!(view.point(0.0, 89.5, 1).1, view.point(0.0, 90.0, 1).1);
+    let image = render(&opts).unwrap();
+    let point = view.point(0.0, 89.5, 1);
+    assert!(point.1 > 0.0 && point.1 < 128.0, "{point:?}");
+    assert_eq!(rgb(&image, point.0 as u32, point.1 as u32), [255, 0, 0]);
+    // The strip above the world edge keeps the background color.
+    assert_eq!(rgb(&image, 128, 2), [221, 221, 221]);
+}
+
+#[test]
+fn cli_accepts_antimeridian_and_polar_requests() {
+    let path = std::env::temp_dir().join(format!("mapshoot-wrap-{}.png", std::process::id()));
+    for (center, radius) in [
+        ("179.99,0", "10000"),
+        ("-179.99,10", "10000"),
+        ("0,89", "10000"),
+        ("0,-89.9", "50000"),
+    ] {
+        let result = cli(&[
+            "--center",
+            center,
+            "--radius",
+            radius,
+            "--basemap",
+            "none",
+            "--width",
+            "320",
+            "--height",
+            "320",
+            "-o",
+            path.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{center}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

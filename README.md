@@ -53,10 +53,13 @@ mapshoot --center 13.405,52.52 --radius 1500 --basemap none -o - > map.png
 ```
 
 Coordinates always use **longitude, latitude**; bbox uses **west, south, east,
-north**. Radius is in meters, using a spherical Earth bounding box. Bounds and
-GeoJSON coordinates must be within Web Mercator latitude limits
-(+/-85.05112878 degrees). Pole/antimeridian-crossing areas are rejected; lines
-crossing the antimeridian are not unwrapped. Radius must be positive and at most
+north**. Radius is in meters, using a spherical Earth bounding box. A bbox with
+`west > east` crosses the antimeridian, and `--center` with `--radius` wraps
+automatically. Latitude accepts -90..90; parts of the area beyond the Web
+Mercator limit (+/-85.05112878 degrees) are clipped to the edge of the world and
+show the background color there. GeoJSON coordinates use the same limits and
+clamp to the world edge. Line and polygon segments crossing the antimeridian are
+not unwrapped and take the long way around. Radius must be positive and at most
 1,000 km.
 
 The renderer chooses the highest integer zoom that fits the requested area,
