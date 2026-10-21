@@ -24,6 +24,18 @@ pub const HERE_STYLES: &[&str] = &[
     "topo.night",
     "dem",
 ];
+/// Raster styles offered by the CARTO basemap preset.
+///
+/// `light_*` is CARTO Positron and `dark_*` is CARTO Dark Matter.
+pub const CARTO_STYLES: &[&str] = &[
+    "voyager",
+    "voyager_nolabels",
+    "voyager_labels_under",
+    "light_all",
+    "light_nolabels",
+    "dark_all",
+    "dark_nolabels",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -226,8 +238,15 @@ pub(crate) fn coordinate(lon: f64, lat: f64) -> Result<()> {
 
 #[derive(Clone)]
 pub enum Basemap {
+    /// No tiles; overlays are drawn on the plain background color.
     None,
+    /// HERE raster tiles. `style` must be one of [`HERE_STYLES`].
     Here { api_key: String, style: String },
+    /// The official OpenStreetMap raster tile server.
+    Osm,
+    /// CARTO raster tiles. `style` must be one of [`CARTO_STYLES`].
+    Carto { api_key: String, style: String },
+    /// Any provider with an XYZ URL template.
     Xyz { url: String, attribution: String },
 }
 
@@ -236,8 +255,14 @@ impl fmt::Debug for Basemap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => f.write_str("None"),
+            Self::Osm => f.write_str("Osm"),
             Self::Here { style, .. } => f
                 .debug_struct("Here")
+                .field("api_key", &"<redacted>")
+                .field("style", style)
+                .finish(),
+            Self::Carto { style, .. } => f
+                .debug_struct("Carto")
                 .field("api_key", &"<redacted>")
                 .field("style", style)
                 .finish(),
@@ -261,21 +286,46 @@ impl Basemap {
                 if !HERE_STYLES.contains(&style.as_str()) {
                     return Err(error(format!("unknown HERE style: {style}")));
                 }
-                let key: String = api_key
-                    .bytes()
-                    .map(|b| {
-                        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-                            char::from(b).to_string()
-                        } else {
-                            format!("%{b:02X}")
-                        }
-                    })
-                    .collect();
+                let key = encode_query_value(api_key);
                 Ok(Some((
                     format!(
                         "https://maps.hereapi.com/v3/base/mc/{{z}}/{{x}}/{{y}}/png?apiKey={key}&style={style}&size={tile_size}"
                     ),
                     "(c) HERE".into(),
+                )))
+            }
+            Self::Osm => {
+                if tile_size != 256 {
+                    return Err(error(
+                        "the OSM preset serves 256 px tiles; use --tile-size 256 or --basemap xyz",
+                    ));
+                }
+                Ok(Some((
+                    "https://tile.openstreetmap.org/{z}/{x}/{y}.png".into(),
+                    "(c) OpenStreetMap contributors".into(),
+                )))
+            }
+            Self::Carto { api_key, style } => {
+                if api_key.trim().is_empty() {
+                    return Err(error("CARTO API key is empty"));
+                }
+                if !CARTO_STYLES.contains(&style.as_str()) {
+                    return Err(error(format!(
+                        "unknown CARTO style: {style}; expected one of {}",
+                        CARTO_STYLES.join(", ")
+                    )));
+                }
+                if tile_size != 256 {
+                    return Err(error(
+                        "the CARTO preset serves 256 px tiles; use --tile-size 256 or --basemap xyz",
+                    ));
+                }
+                let key = encode_query_value(api_key);
+                Ok(Some((
+                    format!(
+                        "https://basemaps.cartocdn.com/rastertiles/{style}/{{z}}/{{x}}/{{y}}.png?key={key}"
+                    ),
+                    "(c) OpenStreetMap contributors, (c) CARTO".into(),
                 )))
             }
             Self::Xyz { url, attribution } => {
@@ -291,6 +341,20 @@ impl Basemap {
             }
         }
     }
+}
+
+/// Percent-encode one URL query value. Non-ASCII UTF-8 bytes are encoded too.
+fn encode_query_value(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -572,6 +636,8 @@ impl Renderer {
             tiles::compose(&self.agent, &mut image, &viewport, options, &url).map_err(|err| {
                 let provider = match options.basemap {
                     Basemap::Here { .. } => "HERE",
+                    Basemap::Osm => "OSM",
+                    Basemap::Carto { .. } => "CARTO",
                     _ => "XYZ",
                 };
                 Error::new(err.kind(), format!("{provider} basemap failed: {err}"))
@@ -624,5 +690,58 @@ mod tests {
             }
         }
         assert!(Basemap::None.source(256).unwrap().is_none());
+    }
+
+    #[test]
+    fn osm_preset_uses_the_official_server_and_256_px_tiles() {
+        let (url, attribution) = Basemap::Osm.source(256).unwrap().unwrap();
+        assert_eq!(url, "https://tile.openstreetmap.org/{z}/{x}/{y}.png");
+        assert_eq!(attribution, "(c) OpenStreetMap contributors");
+        assert!(Basemap::Osm.source(512).is_err());
+    }
+
+    #[test]
+    fn carto_templates_encode_credentials_and_include_each_style() {
+        for style in CARTO_STYLES {
+            let carto = Basemap::Carto {
+                api_key: "a&b /?é".into(),
+                style: (*style).into(),
+            };
+            let (url, attribution) = carto.source(256).unwrap().unwrap();
+            assert_eq!(
+                url,
+                format!(
+                    "https://basemaps.cartocdn.com/rastertiles/{style}/{{z}}/{{x}}/{{y}}.png?key=a%26b%20%2F%3F%C3%A9"
+                )
+            );
+            assert_eq!(attribution, "(c) OpenStreetMap contributors, (c) CARTO");
+            assert!(carto.source(512).is_err());
+        }
+    }
+
+    #[test]
+    fn carto_rejects_empty_keys_and_unknown_styles() {
+        for (api_key, style) in [("", "voyager"), ("key", "unknown")] {
+            let carto = Basemap::Carto {
+                api_key: api_key.into(),
+                style: style.into(),
+            };
+            assert!(carto.source(256).is_err());
+        }
+    }
+
+    #[test]
+    fn basemap_debug_redacts_api_keys() {
+        let carto = Basemap::Carto {
+            api_key: "TOPSECRET".into(),
+            style: "voyager".into(),
+        };
+        let debug = format!("{carto:?}");
+        assert!(
+            debug.contains("Carto") && debug.contains("voyager"),
+            "{debug}"
+        );
+        assert!(!debug.contains("TOPSECRET"), "{debug}");
+        assert_eq!(format!("{:?}", Basemap::Osm), "Osm");
     }
 }

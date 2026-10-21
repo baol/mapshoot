@@ -194,6 +194,29 @@ fn invalid_options_are_errors() {
     };
     cases.push(o);
     let mut o = options();
+    o.basemap = Basemap::Osm;
+    o.tile_size = 512;
+    cases.push(o);
+    let mut o = options();
+    o.basemap = Basemap::Carto {
+        api_key: "".into(),
+        style: "voyager".into(),
+    };
+    cases.push(o);
+    let mut o = options();
+    o.basemap = Basemap::Carto {
+        api_key: "secret".into(),
+        style: "invalid".into(),
+    };
+    cases.push(o);
+    let mut o = options();
+    o.basemap = Basemap::Carto {
+        api_key: "secret".into(),
+        style: "voyager".into(),
+    };
+    o.tile_size = 512;
+    cases.push(o);
+    let mut o = options();
     o.basemap = Basemap::Xyz {
         url: "file:///{z}/{x}/{y}".into(),
         attribution: "Local".into(),
@@ -689,7 +712,14 @@ fn cli(args: &[&str]) -> Output {
 fn cli_help_validation_and_png_stdout() {
     let help = cli(&["--help"]);
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("longitude,latitude"));
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help_text.contains("longitude,latitude"));
+    assert!(help_text.contains("here|osm|carto|xyz|none"), "{help_text}");
+    assert!(help_text.contains("--carto-style"), "{help_text}");
+    assert!(help_text.contains("MAPSHOOT_CARTO_API_KEY"), "{help_text}");
+    assert!(help_text.contains("MAPSHOOT_HERE_API_KEY"), "{help_text}");
+    assert!(help_text.contains("voyager_labels_under"), "{help_text}");
+    assert!(help_text.contains("logistics.satellite.day"), "{help_text}");
     for args in [
         vec!["--bogus"],
         vec!["--bbox", "0,,1,1", "-o", "-", "--basemap", "none"],
@@ -765,14 +795,129 @@ fn cli_help_validation_and_png_stdout() {
 fn cli_missing_here_key_fails_instead_of_producing_a_blank_map() {
     let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
         .env_remove("HERE_API_KEY")
+        .env_remove("MAPSHOOT_HERE_API_KEY")
         .args(["--bbox", "13.37,52.50,13.44,52.54", "-o", "-"])
         .output()
         .unwrap();
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
     let message = String::from_utf8_lossy(&result.stderr);
-    assert!(message.contains("HERE_API_KEY is required"));
-    assert!(message.contains("--basemap xyz"));
+    assert!(message.contains("MAPSHOOT_HERE_API_KEY"), "{message}");
+    assert!(message.contains("HERE_API_KEY"), "{message}");
+    assert!(message.contains("--basemap osm"), "{message}");
+}
+
+#[test]
+fn cli_carto_requires_a_key_and_validates_styles_and_flags() {
+    let bbox = ["--bbox", "13.37,52.50,13.44,52.54", "-o", "-"];
+
+    let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+        .env_remove("CARTO_API_KEY")
+        .env_remove("MAPSHOOT_CARTO_API_KEY")
+        .args([bbox.as_slice(), &["--basemap", "carto"]].concat())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("MAPSHOOT_CARTO_API_KEY"), "{message}");
+    assert!(message.contains("CARTO_API_KEY"), "{message}");
+    assert!(
+        message.contains("https://carto.com/basemaps/apikey"),
+        "{message}"
+    );
+
+    // The prefixed variable is accepted; the invalid style fails before any
+    // network request is attempted.
+    for (variable, other) in [
+        ("MAPSHOOT_CARTO_API_KEY", "CARTO_API_KEY"),
+        ("CARTO_API_KEY", "MAPSHOOT_CARTO_API_KEY"),
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+            .env_remove("CARTO_API_KEY")
+            .env_remove("MAPSHOOT_CARTO_API_KEY")
+            .env(variable, "test-key")
+            .env_remove(other)
+            .args(
+                [
+                    bbox.as_slice(),
+                    &["--basemap", "carto", "--carto-style", "bogus"],
+                ]
+                .concat(),
+            )
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        let message = String::from_utf8_lossy(&result.stderr);
+        assert!(message.contains("unknown CARTO style: bogus"), "{message}");
+        assert!(message.contains("voyager"), "{message}");
+    }
+
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "none",
+        "--carto-style",
+        "voyager",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("--carto-style requires --basemap carto"),
+        "{message}"
+    );
+
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "osm",
+        "--here-style",
+        "explore.day",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("--here-style requires --basemap here"),
+        "{message}"
+    );
+
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "osm",
+        "--tile-url",
+        "https://example.com/{z}/{x}/{y}.png",
+        "--attribution",
+        "Test",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("require --basemap xyz"), "{message}");
+
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "osm",
+        "--tile-size",
+        "512",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("OSM preset serves 256 px tiles"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -1263,6 +1408,13 @@ fn debug_output_redacts_credentials() {
     let debug = format!("{opts:?}");
     assert!(!debug.contains("SECRET-KEY"), "{debug}");
     assert!(debug.contains("lite.day"), "{debug}");
+    opts.basemap = Basemap::Carto {
+        api_key: "SECRET-KEY".into(),
+        style: "voyager".into(),
+    };
+    let debug = format!("{opts:?}");
+    assert!(!debug.contains("SECRET-KEY"), "{debug}");
+    assert!(debug.contains("voyager"), "{debug}");
     opts.basemap = Basemap::Xyz {
         url: "https://tiles.example/SECRET-KEY/{z}/{x}/{y}.png".into(),
         attribution: "Test".into(),

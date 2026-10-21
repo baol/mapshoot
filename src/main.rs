@@ -11,27 +11,50 @@ const HELP: &str = "\
 Usage: mapshoot --bbox west,south,east,north --output map.png [options]
        mapshoot --center longitude,latitude --radius meters --output map.png
 
-  --basemap here|xyz|none   Default: here; none explicitly disables the basemap
-  --here-style NAME         Default: explore.day
-  --tile-url URL            HTTP(S) PNG template with {z}, {x}, {y}
-  --attribution TEXT        Required for XYZ; printable ASCII, not HTML
-  --geojson FILE            GeoJSON overlay
-  --style FILE              JSON: color, fillColor, weight, opacity, fillOpacity, radius
+Basemap:
+  --basemap here|osm|carto|xyz|none
+                            Default: here; none disables map tiles
+  --here-style NAME         HERE only (default: explore.day)
+  --carto-style NAME        CARTO only (default: voyager)
+  --tile-url URL            XYZ only: HTTP(S) PNG template with {z}, {x}, {y}
+  --attribution TEXT        XYZ only: required, printable ASCII, not HTML
+  --tile-size N             256 or 512 (default: 256); osm/carto are 256 only
+  HERE key:  MAPSHOOT_HERE_API_KEY  (legacy: HERE_API_KEY)
+  CARTO key: MAPSHOOT_CARTO_API_KEY (legacy: CARTO_API_KEY)
+             free key at https://carto.com/basemaps/apikey
+  OSM needs no key; use --concurrency 2 and avoid bulk/offline downloads.
+  XYZ credentials belong in --tile-url.
+
+  HERE styles: explore.day, explore.night, explore.satellite.day, lite.day,
+    lite.night, lite.satellite.day, logistics.day, logistics.night,
+    logistics.satellite.day, satellite.day, topo.day, topo.night, dem
+  CARTO styles: voyager, voyager_nolabels, voyager_labels_under, light_all,
+    light_nolabels, dark_all, dark_nolabels
+
+Area:
+  --bbox W,S,E,N            Longitude,latitude; west > east crosses the antimeridian
+  --center LON,LAT          Requires --radius; alternative to --bbox
+  --radius METERS           Radius around --center, at most 1000000
   --buffer METERS           Expand the box on every side (default: 0)
+
+Image:
   --width N                 Image width (default: 1024)
   --height N                Image height (default: follows the box aspect)
   --aspect-ratio W:H|N      Frame shape; the box is fitted inside
   --pixel-ratio N           Integer output scale 1..4 (default: 1)
   --max-zoom N              Highest tile zoom 0..22 (default: 20)
-  --tile-size N             256 or 512, must match provider (default: 256)
   --concurrency N           Parallel downloads 1..32 (default: 8)
   --timeout N               Total download deadline in ms (default: 15000)
+
+Overlay and output:
+  --geojson FILE            GeoJSON overlay; works with any basemap
+  --style FILE              JSON: color, fillColor, weight, opacity, fillOpacity, radius
   --output, -o FILE         PNG output; use - for stdout
   --help, -h                Show help
   --version                 Show version
 
 Options accept --flag VALUE or --flag=VALUE.
-Coordinates are longitude,latitude. Radius is in meters. PNG output only.
+Radius and buffer are in meters. PNG output only.
 ";
 
 fn main() {
@@ -74,6 +97,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--output",
             "--basemap",
             "--here-style",
+            "--carto-style",
             "--tile-url",
             "--attribution",
             "--geojson",
@@ -154,13 +178,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         "none" => Basemap::None,
         "here" => Basemap::Here {
-            api_key: std::env::var("HERE_API_KEY").map_err(|_| {
-                "HERE_API_KEY is required for the HERE basemap; set it or use --basemap xyz with --tile-url and --attribution"
-            })?,
+            api_key: provider_key("HERE")?,
             style: values
                 .get("--here-style")
                 .cloned()
                 .unwrap_or_else(|| "explore.day".into()),
+        },
+        "osm" => Basemap::Osm,
+        "carto" => Basemap::Carto {
+            api_key: provider_key("CARTO")?,
+            style: values
+                .get("--carto-style")
+                .cloned()
+                .unwrap_or_else(|| "voyager".into()),
         },
         "xyz" => Basemap::Xyz {
             url: values
@@ -172,10 +202,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("--attribution is required for xyz")?
                 .clone(),
         },
-        _ => return Err("--basemap must be here, xyz or none".into()),
+        _ => return Err("--basemap must be here, osm, carto, xyz or none".into()),
     };
     if !matches!(basemap, Basemap::Here { .. }) && values.contains_key("--here-style") {
         return Err("--here-style requires --basemap here".into());
+    }
+    if !matches!(basemap, Basemap::Carto { .. }) && values.contains_key("--carto-style") {
+        return Err("--carto-style requires --basemap carto".into());
     }
     if !matches!(basemap, Basemap::Xyz { .. })
         && (values.contains_key("--tile-url") || values.contains_key("--attribution"))
@@ -268,6 +301,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Saved {output}");
     }
     Ok(())
+}
+
+/// Read a provider key from `MAPSHOOT_<PROVIDER>_API_KEY`, falling back to the
+/// legacy unprefixed name. The prefixed variable takes precedence.
+fn provider_key(provider: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let prefixed = format!("MAPSHOOT_{provider}_API_KEY");
+    let legacy = format!("{provider}_API_KEY");
+    for name in [&prefixed, &legacy] {
+        if let Ok(value) = std::env::var(name) {
+            if !value.trim().is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+    let hint = if provider == "CARTO" {
+        "; get a free key at https://carto.com/basemaps/apikey"
+    } else {
+        "; set it or use --basemap osm or --basemap xyz"
+    };
+    Err(format!(
+        "{prefixed} (or {legacy}) is required for the {} basemap{hint}",
+        provider.to_ascii_lowercase()
+    )
+    .into())
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(

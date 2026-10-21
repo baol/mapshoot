@@ -1,8 +1,9 @@
 # mapshoot
 
-Native map images from HERE/XYZ PNG tiles and GeoJSON overlays. Rust CLI and
-library, CPU rendering with tiny-skia. No browser, Node.js, GUI, GPU, or async
-runtime. The executable does not download code or assets at startup.
+Native map images from HERE, OpenStreetMap, CARTO, or XYZ PNG tiles and GeoJSON
+overlays. Rust CLI and library, CPU rendering with tiny-skia. No browser,
+Node.js, GUI, GPU, or async runtime. The executable does not download code or
+assets at startup.
 
 ## Build
 
@@ -27,17 +28,28 @@ if a fully static Linux executable is required.
 
 ## CLI
 
-For a complete map, use HERE (the default) with a valid `HERE_API_KEY`, or
-XYZ with a provider URL. **`--basemap none` deliberately produces no basemap**;
-it is only for offline overlay rendering and emits a warning on stderr.
+For a complete map, use HERE (the default), OSM, or CARTO, or XYZ with a
+provider URL. HERE and CARTO need an API key; OSM does not.
+**`--basemap none` deliberately produces no basemap**; it is only for offline
+overlay rendering and emits a warning on stderr.
 
 ```sh
-export HERE_API_KEY='your-key'
+export MAPSHOOT_HERE_API_KEY='your-key'   # legacy: HERE_API_KEY
 mapshoot --center 13.405,52.52 --radius 1500 \
   --here-style explore.day \
   --geojson examples/overlay.geojson --style examples/style.json \
   --output berlin.png
 
+# OpenStreetMap, no key:
+mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap osm \
+  --output berlin-osm.png
+
+# CARTO, free key from https://carto.com/basemaps/apikey:
+export MAPSHOOT_CARTO_API_KEY='your-key'  # legacy: CARTO_API_KEY
+mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap carto \
+  --carto-style voyager --output berlin-carto.png
+
+# Any XYZ provider:
 mapshoot --bbox 13.37,52.50,13.44,52.54 \
   --basemap xyz \
   --tile-url 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' \
@@ -55,6 +67,21 @@ mapshoot --bbox 13.37,52.50,13.44,52.54 --buffer 1000 \
 # Binary PNG on stdout; status/errors go to stderr:
 mapshoot --center 13.405,52.52 --radius 1500 --basemap none -o - > map.png
 ```
+
+### Basemaps and keys
+
+| `--basemap` | Provider | Key variables (first match wins) | Style flag |
+|---|---|---|---|
+| `here` (default) | HERE | `MAPSHOOT_HERE_API_KEY`, then `HERE_API_KEY` | `--here-style`, default `explore.day` |
+| `osm` | OpenStreetMap | none | none |
+| `carto` | CARTO | `MAPSHOOT_CARTO_API_KEY`, then `CARTO_API_KEY` | `--carto-style`, default `voyager` |
+| `xyz` | Any XYZ provider | credentials belong in `--tile-url` | none |
+| `none` | No tiles | none | none |
+
+The `MAPSHOOT_*` variable takes precedence over the unprefixed legacy name.
+A missing or empty key is an error, not a silent fallback. The `osm` and
+`carto` presets serve 256 px tiles; use `--tile-size 512` only with `here` or
+`xyz`.
 
 Coordinates always use **longitude, latitude**; bbox uses **west, south, east,
 north**. Radius is in meters, using a spherical Earth bounding box. A bbox with
@@ -85,15 +112,17 @@ wraps at the world edge.
 
 | Option | Default / meaning |
 |---|---|
-| `--basemap` | `here`, `xyz`, or `none`; default `here` |
-| `--here-style` | `explore.day` |
+| `--basemap` | `here`, `osm`, `carto`, `xyz`, or `none`; default `here` |
+| `--here-style` | HERE only; default `explore.day` |
+| `--carto-style` | CARTO only; default `voyager` |
+| `--tile-url`, `--attribution` | XYZ only; URL template with `{z}`, `{x}`, `{y}`, and required plain-ASCII attribution |
 | `--buffer` | 0 meters; grows the box on every side, wrapping longitudes and clamping at the Mercator limit |
 | `--width` | 1024 logical pixels |
 | `--height` | follows the box aspect; an explicit value fits the box inside |
 | `--aspect-ratio` | `W:H` or a number; fixes the frame and fits the box inside |
 | `--pixel-ratio` | Integer 1..4; scales dimensions and overlays, not tile detail |
 | `--max-zoom` | 20; allowed 0..22, set to provider's supported maximum |
-| `--tile-size` | 256; accepts 256 or 512 and is sent to HERE as the tile `size`, must match returned tile dimensions |
+| `--tile-size` | 256; accepts 256 or 512, must match returned tile dimensions; `osm` and `carto` are 256 only |
 | `--concurrency` | 8 parallel tile requests; allowed 1..32 |
 | `--timeout` | 15000 ms total deadline for the tile download phase |
 | `--output`, `-o` | Required `.png` path or `-` for stdout |
@@ -106,9 +135,10 @@ must be a valid PNG of the configured size. Errors fail the entire render;
 there is no silent partial-map fallback. HTTP error messages identify tile
 coordinates, not URLs, to avoid leaking API keys. A tile error may wait for
 other in-flight requests to finish within the deadline.
-Basemap failures exit with status 1, identify HERE or XYZ, and include actionable
-HTTP status hints. No image is written on download failure; existing files are
-preserved. Missing HERE credentials are an error, not an offline fallback.
+Basemap failures exit with status 1, identify HERE, OSM, CARTO, or XYZ, and
+include actionable HTTP status hints. No image is written on download failure;
+existing files are preserved. Missing HERE or CARTO credentials are an error,
+not an offline fallback.
 
 The output directory must exist. Rendering and PNG encoding complete before the
 output file is opened, and files are written to a temporary file and renamed
@@ -120,23 +150,56 @@ Closing stdout early (`mapshoot ... -o - | head`) is not an error.
 
 ### HERE styles and attribution
 
-`explore.day`, `explore.night`, `explore.satellite.day`, `lite.day`, `lite.night`,
-`lite.satellite.day`, `logistics.day`, `logistics.night`,
-`logistics.satellite.day`, `satellite.day`, `topo.day`, `topo.night`, `dem`.
+`--here-style` accepts `explore.day`, `explore.night`,
+`explore.satellite.day`, `lite.day`, `lite.night`, `lite.satellite.day`,
+`logistics.day`, `logistics.night`, `logistics.satellite.day`, `satellite.day`,
+`topo.day`, `topo.night`, and `dem`. The default is `explore.day`.
 
 HERE uses the supplied `maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png` templates
 with `style` and `size` query parameters.
 A valid key and appropriate account permissions are required. Tests use local
 tiles; live HERE requests are not part of automated validation.
 
+### CARTO styles and attribution
+
+`--carto-style` accepts:
+
+- `voyager` (default), `voyager_nolabels`, `voyager_labels_under`
+- `light_all` (CARTO Positron), `light_nolabels`
+- `dark_all` (CARTO Dark Matter), `dark_nolabels`
+
+CARTO raster tiles come from
+`https://basemaps.cartocdn.com/rastertiles/<style>/{z}/{x}/{y}.png?key=...`.
+A key is required; request a free one at
+<https://carto.com/basemaps/apikey>. CARTO images carry the visible
+`(c) OpenStreetMap contributors, (c) CARTO` footer.
+
+### OpenStreetMap
+
+`--basemap osm` uses the official `tile.openstreetmap.org` server and needs no
+key or style flag. Images carry the `(c) OpenStreetMap contributors` footer.
+
+The OSM tile usage policy forbids bulk and offline downloading. mapshoot keeps
+no persistent tile cache and fetches only the tiles used by the requested image.
+Use the OSM preset for one-off or interactive rendering with
+`--concurrency 2`, not for building tile archives or high-volume services. For
+those, self-host or use `--basemap xyz` with a provider that permits it.
+
+### XYZ
+
+`--basemap xyz` requires `--tile-url` with `{z}`, `{x}`, `{y}` placeholders and
+`--attribution`. It has no preset styles and no key variables: put any
+credentials in the URL. The URL and attribution must be valid for every tile.
+
 All requests carry a `mapshoot/<version>` `User-Agent`. Providers such as
 OpenStreetMap require an identifiable agent; library users can pass a custom
 `ureq::Agent` to `Renderer::with_agent` to identify their own application.
 
-HERE images get a visible `(c) HERE` footer. XYZ requires `--attribution`, drawn
-above overlays at the bottom right. Attribution is plain printable ASCII, not
-HTML; use `(c)` for copyright. Text that cannot fit is an error, never silently
-clipped. Observe provider terms and supply any additional required notices.
+HERE, OSM, and CARTO images get a visible attribution footer drawn at the
+bottom right. XYZ uses the supplied `--attribution`. Attribution is plain
+printable ASCII, not HTML; use `(c)` for copyright. Text that cannot fit is an
+error, never silently clipped. Observe provider terms and supply any additional
+required notices.
 
 ### GeoJSON and styling
 
@@ -174,7 +237,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = Options::new(
         Bounds::from_center(13.405, 52.52, 1500.0)?,
         Basemap::Here {
-            api_key: std::env::var("HERE_API_KEY")?,
+            api_key: std::env::var("MAPSHOOT_HERE_API_KEY")
+                .or_else(|_| std::env::var("HERE_API_KEY"))?,
             style: "explore.day".into(),
         },
     );
@@ -190,6 +254,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `render(&options)` is also available as a one-shot function.
 The returned tiny-skia Pixmap can be encoded in memory or further drawn upon.
+
+For OSM use `Basemap::Osm`. For CARTO use
+`Basemap::Carto { api_key, style }` with a style from `CARTO_STYLES`; HERE
+styles are listed in `HERE_STYLES`. The library itself does not read
+environment variables; the example reads the key for its application.
 
 `options.height` is `Option<u32>`. The default `None` follows the bbox aspect
 ratio exactly; `Some(h)` fixes the frame and fits the bbox inside it. Use
