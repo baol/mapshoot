@@ -42,12 +42,6 @@ fn position(value: &Value) -> Result<(f64, f64)> {
     Ok((lon, lat))
 }
 
-/// Longitude step in (-180, 180]: the shortest way around the globe.
-fn shortest_delta(from: f64, to: f64) -> f64 {
-    let delta = (to - from).rem_euclid(360.0);
-    if delta > 180.0 { delta - 360.0 } else { delta }
-}
-
 fn line(
     builder: &mut PathBuilder,
     value: &Value,
@@ -79,11 +73,20 @@ fn line(
         &points[1..]
     };
     let mut previous = first.0;
+    let mut offset = 0.0;
     for point in interior {
         let (lon, lat) = position(point)?;
-        let lon = previous + shortest_delta(previous, lon);
-        previous = lon;
-        let (x, y) = view.point_in_copy(lon, lat, copy, ratio);
+        let mut delta = (lon - previous).rem_euclid(360.0);
+        if delta > 180.0 {
+            delta -= 360.0;
+        } else if delta == 180.0 && offset > 0.0 {
+            // A half turn is ambiguous; return the way we came so a shape
+            // spanning half the world does not wrap around the globe.
+            delta = -180.0;
+        }
+        previous += delta;
+        offset += delta;
+        let (x, y) = view.point_in_copy(previous, lat, copy, ratio);
         builder.line_to(x, y);
     }
     if ring {
@@ -199,7 +202,7 @@ pub(crate) fn draw(
         line_join: LineJoin::Round,
         ..Stroke::default()
     };
-    let world = view.world_size * f64::from(ratio);
+    let world = view.world_size * view.scale * f64::from(ratio);
     let width = f64::from(image.width());
     for shape in shapes {
         let (path, should_fill) = match shape {

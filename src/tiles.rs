@@ -31,10 +31,10 @@ pub(crate) fn compose(
     let size = f64::from(options.tile_size);
     let count = 1_i64 << view.zoom;
     let left = (view.left / size).floor() as i64;
-    let right = ((view.left + f64::from(options.width)) / size).ceil() as i64;
+    let right = ((view.left + view.visible_width()) / size).ceil() as i64;
     let top = ((view.top / size).floor() as i64).max(0);
-    let bottom = (((view.top + f64::from(options.height)) / size).ceil() as i64).min(count);
-    let ratio = options.pixel_ratio as f32;
+    let bottom = (((view.top + view.visible_height()) / size).ceil() as i64).min(count);
+    let scale = (view.scale * f64::from(options.pixel_ratio)) as f32;
     let mut placements: Vec<Placement> = Vec::new();
     let mut slots: HashMap<(i64, i64), usize> = HashMap::new();
     let mut placements_count = 0_usize;
@@ -46,8 +46,8 @@ pub(crate) fn compose(
                 y,
             };
             let origin = (
-                (x as f64 * size - view.left) as f32 * ratio,
-                (y as f64 * size - view.top) as f32 * ratio,
+                ((x as f64 * size - view.left) * f64::from(scale)) as f32,
+                ((y as f64 * size - view.top) * f64::from(scale)) as f32,
             );
             let index = *slots.entry((tile.x, tile.y)).or_insert_with(|| {
                 placements.push(Placement {
@@ -109,7 +109,7 @@ pub(crate) fn compose(
         for (index, result) in receiver {
             match result {
                 Ok(pixels) if pending_error.is_none() => {
-                    draw_tile(image, &placements[index].origins, &pixels, ratio);
+                    draw_tile(image, &placements[index].origins, &pixels, scale);
                 }
                 Ok(_) => {}
                 Err(err) => {
@@ -121,9 +121,14 @@ pub(crate) fn compose(
     pending_error.map_or(Ok(()), Err)
 }
 
-fn draw_tile(image: &mut Pixmap, origins: &[(f32, f32)], pixels: &Pixmap, ratio: f32) {
+fn draw_tile(image: &mut Pixmap, origins: &[(f32, f32)], pixels: &Pixmap, scale: f32) {
     let paint = PixmapPaint {
-        quality: FilterQuality::Nearest,
+        // Whole-tile scales stay crisp; fractional zooms are resampled.
+        quality: if (scale - 1.0).abs() < 1e-3 {
+            FilterQuality::Nearest
+        } else {
+            FilterQuality::Bicubic
+        },
         ..PixmapPaint::default()
     };
     for &(x, y) in origins {
@@ -132,7 +137,7 @@ fn draw_tile(image: &mut Pixmap, origins: &[(f32, f32)], pixels: &Pixmap, ratio:
             0,
             pixels.as_ref(),
             &paint,
-            Transform::from_row(ratio, 0.0, 0.0, ratio, x, y),
+            Transform::from_row(scale, 0.0, 0.0, scale, x, y),
             None,
         );
     }

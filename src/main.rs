@@ -17,9 +17,9 @@ Usage: mapshoot --bbox west,south,east,north --output map.png [options]
   --attribution TEXT        Required for XYZ; printable ASCII, not HTML
   --geojson FILE            GeoJSON overlay
   --style FILE              JSON: color, fillColor, weight, opacity, fillOpacity, radius
-  --width N --height N      Logical dimensions (default: 1024 x 768)
+  --width N                 Image width (default: 1024)
+  --height N                Image height (default: follows the box aspect)
   --pixel-ratio N           Integer output scale 1..4 (default: 1)
-  --padding N               Fit padding in logical pixels (default: 20)
   --max-zoom N              Highest tile zoom 0..22 (default: 20)
   --tile-size N             256 or 512, must match provider (default: 256)
   --concurrency N           Parallel downloads 1..32 (default: 8)
@@ -79,7 +79,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--width",
             "--height",
             "--pixel-ratio",
-            "--padding",
             "--max-zoom",
             "--tile-size",
             "--concurrency",
@@ -181,8 +180,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
     number!("--width", width);
-    number!("--height", height);
-    number!("--padding", padding);
+    if let Some(value) = values.get("--height") {
+        options.height = Some(
+            value
+                .parse()
+                .map_err(|_| format!("--height must be a number, got {value:?}"))?,
+        );
+    }
     number!("--pixel-ratio", pixel_ratio);
     number!("--max-zoom", max_zoom);
     number!("--tile-size", tile_size);

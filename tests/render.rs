@@ -18,7 +18,7 @@ fn options() -> Options {
         Basemap::None,
     );
     options.width = 256;
-    options.height = 256;
+    options.height = Some(256);
     options
 }
 
@@ -51,8 +51,7 @@ fn bounds_radius_and_projection() {
     let mut whole_opts = options();
     whole_opts.bounds = whole;
     whole_opts.width = 512;
-    whole_opts.height = 512;
-    whole_opts.padding = 0;
+    whole_opts.height = Some(512);
     let whole_view = Viewport::new(&whole_opts).unwrap();
     assert_eq!((whole_view.zoom, whole_view.world_size), (1, 512.0));
     assert!(Bounds::new(0.0, 0.0, 1.0, MAX_LATITUDE).is_ok());
@@ -80,7 +79,12 @@ fn bounds_radius_and_projection() {
     assert!((center.0 - 128.0).abs() <= 1.0 && (center.1 - 128.0).abs() <= 1.0);
     let nw = view.point(opts.bounds.west, opts.bounds.north, 1);
     let se = view.point(opts.bounds.east, opts.bounds.south, 1);
-    assert!(nw.0 >= 19.0 && nw.1 >= 19.0 && se.0 <= 237.0 && se.1 <= 237.0);
+    // The box fills the frame exactly, up to pixel rounding.
+    assert!(nw.0.abs() <= 1.0 && nw.1.abs() <= 1.0, "{nw:?}");
+    assert!(
+        (se.0 - 256.0).abs() <= 1.0 && (se.1 - 256.0).abs() <= 1.0,
+        "{se:?}"
+    );
     assert!(view.point(0.0, 0.005, 1).1 < center.1);
 }
 
@@ -143,21 +147,15 @@ fn invalid_options_are_errors() {
     o.width = 0;
     cases.push(o);
     let mut o = options();
-    o.height = 8193;
+    o.height = Some(8193);
     cases.push(o);
     let mut o = options();
     o.pixel_ratio = 0;
     cases.push(o);
     let mut o = options();
     o.width = 8192;
-    o.height = 8192;
+    o.height = Some(8192);
     o.pixel_ratio = 4;
-    cases.push(o);
-    let mut o = options();
-    o.padding = 128;
-    cases.push(o);
-    let mut o = options();
-    o.padding = u32::MAX;
     cases.push(o);
     let mut o = options();
     o.tile_size = 128;
@@ -211,9 +209,11 @@ fn invalid_options_are_errors() {
         assert!(render(&opts).is_err(), "{opts:?}");
     }
     assert!(serde_json::from_str::<Style>(r##"{"colour":"#ffffff"}"##).is_err());
+    // A frame that follows the box aspect can still need an unusable height.
     let mut opts = options();
-    opts.bounds = Bounds::new(-180.0, -MAX_LATITUDE, 180.0, MAX_LATITUDE).unwrap();
-    opts.width = 100;
+    opts.bounds = Bounds::new(0.0, 0.0, 0.001, 40.0).unwrap();
+    opts.width = 1024;
+    opts.height = None;
     assert!(Viewport::new(&opts).is_err());
 }
 
@@ -413,8 +413,7 @@ impl Fixture {
         let mut opts = options();
         opts.bounds = Bounds::new(-180.0, -MAX_LATITUDE, 180.0, MAX_LATITUDE).unwrap();
         opts.width = 512;
-        opts.height = 512;
-        opts.padding = 0;
+        opts.height = Some(512);
         opts.basemap = Basemap::Xyz {
             url: self.url.clone(),
             attribution: "Test".into(),
@@ -521,7 +520,7 @@ fn tile_crop_pixel_ratio_and_projection_align() {
     let server = Fixture::new(200, Duration::ZERO, false);
     let mut opts = server.options();
     opts.width = 300;
-    opts.height = 300;
+    opts.height = Some(300);
     opts.pixel_ratio = 2;
     opts.bounds = Bounds::new(-20.0, -20.0, 20.0, 20.0).unwrap();
     opts.geojson = Some(json!({"type":"Point","coordinates":[0,0]}));
@@ -548,16 +547,84 @@ fn tile_crop_pixel_ratio_and_projection_align() {
 }
 
 #[test]
+fn bbox_frames_exactly_and_fits_when_the_frame_differs() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-90.0, -45.0, 90.0, 45.0).unwrap();
+    opts.width = 400;
+    opts.height = None;
+    opts.geojson = Some(json!({"type": "Polygon", "coordinates": [
+        [[-90, -45], [90, -45], [90, 45], [-90, 45], [-90, -45]]
+    ]}));
+    opts.style = Style {
+        color: "#00ff00".into(),
+        fill_opacity: 1.0,
+        weight: 0.0,
+        ..Style::default()
+    };
+    let view = Viewport::new(&opts).unwrap();
+    // The height follows the projected box aspect.
+    assert_eq!((view.width, view.height), (400, 224));
+    let nw = view.point(-90.0, 45.0, 1);
+    let se = view.point(90.0, -45.0, 1);
+    assert!(nw.0.abs() < 1.0 && nw.1.abs() < 1.0, "{nw:?}");
+    assert!(
+        (se.0 - 400.0).abs() < 1.0 && (se.1 - 224.0).abs() < 1.0,
+        "{se:?}"
+    );
+    let image = render(&opts).unwrap();
+    assert_eq!((image.width(), image.height()), (400, 224));
+    // The frame is the box: no margin anywhere.
+    for y in 1..image.height() - 1 {
+        for x in 1..image.width() - 1 {
+            assert_eq!(rgb(&image, x, y), [0, 255, 0], "at {x},{y}");
+        }
+    }
+
+    // A frame with another aspect ratio fits the box inside and shows the
+    // surrounding map instead of cropping the box.
+    opts.height = Some(400);
+    let view = Viewport::new(&opts).unwrap();
+    let nw = view.point(-90.0, 45.0, 1);
+    let se = view.point(90.0, -45.0, 1);
+    assert!(nw.1 > 80.0 && se.1 < 320.0, "{nw:?} {se:?}");
+    let image = render(&opts).unwrap();
+    assert_eq!(rgb(&image, 200, 10), [221, 221, 221]);
+    assert_eq!(rgb(&image, 200, 200), [0, 255, 0]);
+}
+
+#[test]
+fn fractional_zoom_scales_tiles_without_background_gaps() {
+    let server = Fixture::new(200, Duration::ZERO, false);
+    let mut opts = server.options();
+    opts.width = 300;
+    opts.height = None;
+    opts.bounds = Bounds::new(-90.0, -45.0, 90.0, 45.0).unwrap();
+    let view = Viewport::new(&opts).unwrap();
+    assert!(view.scale > 0.5 && view.scale < 1.0, "{}", view.scale);
+    let image = render(&opts).unwrap();
+    assert_eq!((image.width(), image.height()), (300, 168));
+    // Resampling must not leave unpainted rows between tile rows.
+    for y in 0..image.height() {
+        assert_ne!(rgb(&image, 200, y), [221, 221, 221], "gap at y={y}");
+    }
+    // Tiles north and south of the equator keep their own color.
+    assert_eq!(rgb(&image, 200, 78), [200, 100, 50]);
+    assert_eq!(rgb(&image, 200, 90), [200, 200, 50]);
+}
+
+#[test]
 fn world_wrap_and_polar_background_do_not_request_invalid_tiles() {
     let server = Fixture::new(200, Duration::ZERO, false);
     let mut opts = server.options();
     opts.width = 512;
-    opts.height = 512;
+    opts.height = Some(600);
     opts.max_zoom = 0;
     let image = render(&opts).unwrap();
+    assert_eq!((image.width(), image.height()), (512, 600));
     assert_eq!(rgb(&image, 10, 256), [0, 0, 50]);
     assert_eq!(rgb(&image, 500, 256), [0, 0, 50]);
     assert_eq!(rgb(&image, 256, 10), [221, 221, 221]);
+    assert_eq!(rgb(&image, 256, 590), [221, 221, 221]);
     // The one tile needed for the whole row is requested exactly once, then
     // reused at both world offsets.
     assert_eq!(*server.log.paths.lock().unwrap(), ["/0/0/0.png"]);
@@ -927,25 +994,24 @@ fn antimeridian_crossing_views_wrap_tiles_and_overlays() {
         ..Style::default()
     };
     let view = Viewport::new(&opts).unwrap();
-    assert_eq!(view.zoom, 5);
+    assert_eq!(view.zoom, 6);
     let east = view.point(179.5, 0.0, 1);
     let west = view.point(-179.5, 0.0, 1);
-    assert!((east.0 - 245.0).abs() < 2.0, "{east:?}");
-    assert!((west.0 - 267.0).abs() < 2.0, "{west:?}");
+    assert!((east.0 - 243.2).abs() < 1.0, "{east:?}");
+    assert!((west.0 - 268.8).abs() < 1.0, "{west:?}");
     let image = render(&opts).unwrap();
     assert_eq!(rgb(&image, east.0 as u32, east.1 as u32), [255, 0, 0]);
     assert_eq!(rgb(&image, west.0 as u32, west.1 as u32), [255, 0, 0]);
     let paths = server.log.paths.lock().unwrap().clone();
-    assert!(paths.iter().any(|p| p.starts_with("/5/31/")), "{paths:?}");
-    assert!(paths.iter().any(|p| p.starts_with("/5/0/")), "{paths:?}");
+    assert!(paths.iter().any(|p| p.starts_with("/6/63/")), "{paths:?}");
+    assert!(paths.iter().any(|p| p.starts_with("/6/0/")), "{paths:?}");
 }
 
 #[test]
 fn antimeridian_segments_take_the_shortest_path() {
     let mut opts = options();
     opts.width = 512;
-    opts.height = 512;
-    opts.padding = 0;
+    opts.height = Some(512);
     opts.max_zoom = 1;
     opts.bounds = Bounds::new(-180.0, -85.0, 180.0, 85.0).unwrap();
     opts.geojson = Some(json!({"type": "LineString", "coordinates": [[170, 0], [-170, 0]]}));
@@ -968,8 +1034,7 @@ fn antimeridian_segments_take_the_shortest_path() {
 fn antimeridian_polygons_stay_in_one_piece() {
     let mut opts = options();
     opts.width = 512;
-    opts.height = 512;
-    opts.padding = 0;
+    opts.height = Some(512);
     opts.bounds = Bounds::new(170.0, -5.0, -170.0, 5.0).unwrap();
     opts.geojson = Some(json!({"type": "Polygon", "coordinates": [
         [[179, -1], [-179, -1], [-179, 1], [179, 1], [179, -1]]
@@ -990,6 +1055,8 @@ fn antimeridian_polygons_stay_in_one_piece() {
 fn polar_views_clip_to_the_mercator_edge() {
     let mut opts = options();
     opts.bounds = Bounds::new(-10.0, 80.0, 10.0, MAX_LATITUDE).unwrap();
+    // A frame narrower than the box leaves background above the world edge.
+    opts.height = Some(600);
     opts.geojson = Some(json!({"type": "Point", "coordinates": [0.0, 89.5]}));
     opts.style = Style {
         color: "#ff0000".into(),

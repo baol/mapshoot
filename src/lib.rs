@@ -359,9 +359,10 @@ pub struct Options {
     pub bounds: Bounds,
     pub basemap: Basemap,
     pub width: u32,
-    pub height: u32,
+    /// Output height. `None` follows from the box aspect ratio, which makes
+    /// the image cover exactly the requested box.
+    pub height: Option<u32>,
     pub pixel_ratio: u32,
-    pub padding: u32,
     pub max_zoom: u8,
     pub tile_size: u32,
     pub concurrency: usize,
@@ -377,9 +378,8 @@ impl Options {
             bounds,
             basemap,
             width: 1024,
-            height: 768,
+            height: None,
             pixel_ratio: 1,
-            padding: 20,
             max_zoom: 20,
             tile_size: 256,
             concurrency: 8,
@@ -391,18 +391,8 @@ impl Options {
 
     fn validate(&self) -> Result<()> {
         self.bounds.validate()?;
-        if !(1..=8192).contains(&self.width)
-            || !(1..=8192).contains(&self.height)
-            || !(1..=4).contains(&self.pixel_ratio)
-            || u64::from(self.width) * u64::from(self.height) * u64::from(self.pixel_ratio).pow(2)
-                > 67_108_864
-        {
-            return Err(error(
-                "dimensions must be 1..8192, pixel-ratio 1..4, total at most 64 megapixels",
-            ));
-        }
-        if self.padding.saturating_mul(2) >= self.width.min(self.height) {
-            return Err(error("padding leaves no map area"));
+        if !(1..=8192).contains(&self.width) || !(1..=4).contains(&self.pixel_ratio) {
+            return Err(error("width must be 1..8192 and pixel-ratio 1..4"));
         }
         if self.max_zoom > 22 || ![256, 512].contains(&self.tile_size) {
             return Err(error("max-zoom must be 0..22 and tile-size 256 or 512"));
@@ -427,10 +417,15 @@ pub(crate) fn project(lon: f64, lat: f64, world: f64) -> (f64, f64) {
 pub struct Viewport {
     pub zoom: u8,
     pub world_size: f64,
+    /// Logical output pixels per tile pixel; below one when the image is
+    /// rendered at a fractional zoom.
+    pub scale: f64,
+    /// Position of the image's top-left corner in tile pixels.
     pub left: f64,
     pub top: f64,
-    /// Logical image width; used to pick the nearest world copy of a feature.
-    pub width: f64,
+    /// Resolved logical output dimensions.
+    pub width: u32,
+    pub height: u32,
 }
 
 impl Viewport {
@@ -443,28 +438,64 @@ impl Viewport {
             // A box crossing the antimeridian continues into the next world.
             east += 1.0;
         }
-        let available_x = f64::from(options.width - options.padding * 2);
-        let available_y = f64::from(options.height - options.padding * 2);
-        let scale = (available_x / (east - west)).min(available_y / (south - north));
-        let zoom = (scale / f64::from(options.tile_size))
-            .log2()
-            .floor()
-            .clamp(0.0, f64::from(options.max_zoom)) as u8;
-        let world_size = f64::from(options.tile_size) * 2_f64.powi(i32::from(zoom));
-        if (east - west) * world_size > available_x + 1e-6
-            || (south - north) * world_size > available_y + 1e-6
+        let box_width = east - west;
+        let box_height = south - north;
+        let width = options.width;
+        let height = match options.height {
+            Some(height) => height,
+            None => {
+                // Follow the box aspect so the image covers it exactly.
+                let height = (f64::from(width) * box_height / box_width).round();
+                if !(1.0..=8192.0).contains(&height) {
+                    return Err(error(format!(
+                        "the box needs a {height:.0} pixel high image at width {width}; \
+                         pass a smaller --width or an explicit --height / --aspect-ratio"
+                    )));
+                }
+                height as u32
+            }
+        };
+        if !(1..=8192).contains(&height) {
+            return Err(error("height must be 1..8192"));
+        }
+        if u64::from(width) * u64::from(height) * u64::from(options.pixel_ratio).pow(2) > 67_108_864
         {
             return Err(error(
-                "area cannot fit at zoom 0; increase dimensions or reduce padding",
+                "image would exceed 64 megapixels; reduce --width, --height or --pixel-ratio",
             ));
         }
+        // Fit the box into the frame. When the height follows from the box
+        // aspect the frame matches it exactly, up to pixel rounding.
+        let scale = (f64::from(width) / box_width).min(f64::from(height) / box_height);
+        let tile = f64::from(options.tile_size);
+        // Downscale tiles by at most 2x instead of upscaling them; a lower
+        // max-zoom falls back to upscaling.
+        let zoom = (scale / tile)
+            .log2()
+            .ceil()
+            .clamp(0.0, f64::from(options.max_zoom)) as u8;
+        let world_size = tile * 2_f64.powi(i32::from(zoom));
+        let tile_scale = scale / world_size;
+        let visible_width = f64::from(width) / tile_scale;
+        let visible_height = f64::from(height) / tile_scale;
         Ok(Self {
             zoom,
             world_size,
-            left: ((west + east) * world_size / 2.0 - f64::from(options.width) / 2.0).floor(),
-            top: ((north + south) * world_size / 2.0 - f64::from(options.height) / 2.0).floor(),
-            width: f64::from(options.width),
+            scale: tile_scale,
+            left: (west + east) * world_size / 2.0 - visible_width / 2.0,
+            top: (north + south) * world_size / 2.0 - visible_height / 2.0,
+            width,
+            height,
         })
+    }
+
+    /// Width of the image in tile pixels.
+    pub(crate) fn visible_width(&self) -> f64 {
+        f64::from(self.width) / self.scale
+    }
+
+    pub(crate) fn visible_height(&self) -> f64 {
+        f64::from(self.height) / self.scale
     }
 
     pub fn point(&self, longitude: f64, latitude: f64, pixel_ratio: u32) -> (f32, f32) {
@@ -479,7 +510,8 @@ impl Viewport {
     /// Index of the world repetition nearest the view center for a longitude.
     pub(crate) fn nearest_copy(&self, longitude: f64) -> f64 {
         let (x, _) = project(longitude, 0.0, self.world_size);
-        ((self.left + self.width / 2.0 - x) / self.world_size).round()
+        let center = self.left + self.visible_width() / 2.0;
+        ((center - x) / self.world_size).round()
     }
 
     /// Pixel position in a specific world repetition; `longitude` may exceed
@@ -494,8 +526,8 @@ impl Viewport {
         let (x, y) = project(longitude, latitude, self.world_size);
         let x = x + copy * self.world_size;
         (
-            ((x - self.left) * f64::from(pixel_ratio)) as f32,
-            ((y - self.top) * f64::from(pixel_ratio)) as f32,
+            ((x - self.left) * self.scale * f64::from(pixel_ratio)) as f32,
+            ((y - self.top) * self.scale * f64::from(pixel_ratio)) as f32,
         )
     }
 }
@@ -528,11 +560,11 @@ impl Renderer {
         let source = options.basemap.source(options.tile_size)?;
         let paths = geojson::prepare(options.geojson.as_ref(), &viewport, options.pixel_ratio)?;
         if let Some((_, attribution)) = &source {
-            tiles::validate_attribution(attribution, options.width, options.height)?;
+            tiles::validate_attribution(attribution, viewport.width, viewport.height)?;
         }
         let mut image = Pixmap::new(
-            options.width * options.pixel_ratio,
-            options.height * options.pixel_ratio,
+            viewport.width * options.pixel_ratio,
+            viewport.height * options.pixel_ratio,
         )
         .ok_or_else(|| Error::new(ErrorKind::Other, "could not allocate output image"))?;
         image.fill(Color::from_rgba8(221, 221, 221, 255));
