@@ -1,0 +1,82 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "Museum Island" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [13.393, 52.514],
+            [13.403, 52.514],
+            [13.403, 52.522],
+            [13.393, 52.522],
+            [13.393, 52.514]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Unter den Linden" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [13.3777, 52.5163],
+          [13.3835, 52.517],
+          [13.39, 52.5176],
+          [13.397, 52.5184],
+          [13.405, 52.5194],
+          [13.4094, 52.5208],
+          [13.4132, 52.5219]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Hauptbahnhof" },
+      "geometry": { "type": "Point", "coordinates": [13.3694, 52.5251] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Brandenburg Gate" },
+      "geometry": { "type": "Point", "coordinates": [13.3777, 52.5163] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Potsdamer Platz" },
+      "geometry": { "type": "Point", "coordinates": [13.376, 52.5095] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Checkpoint Charlie" },
+      "geometry": { "type": "Point", "coordinates": [13.3904, 52.5075] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Gendarmenmarkt" },
+      "geometry": { "type": "Point", "coordinates": [13.392, 52.513] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Museum Island" },
+      "geometry": { "type": "Point", "coordinates": [13.3975, 52.5186] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "TV Tower" },
+      "geometry": { "type": "Point", "coordinates": [13.4094, 52.5208] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Alexanderplatz" },
+      "geometry": { "type": "Point", "coordinates": [13.4132, 52.5219] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "East Side Gallery" },
+      "geometry": { "type": "Point", "coordinates": [13.4397, 52.505] }
+    }
+  ]
+}

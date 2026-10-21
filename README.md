@@ -5,6 +5,36 @@ overlays. Rust CLI and library, CPU rendering with tiny-skia. No browser,
 Node.js, GUI, GPU, or async runtime. The executable does not download code or
 assets at startup.
 
+## Berlin from GeoJSON
+
+![Berlin Mitte in four basemap styles with the same GeoJSON overlay](docs/berlin-basemaps.png)
+
+mapshoot is built for **automatic, reproducible screenshots of GeoJSON data**:
+give it a center and radius (or a bbox), a basemap, and a GeoJSON file, and it
+writes the finished PNG. No browser, screenshot service, manual tile stitching,
+or post-processing step is involved. The image above renders the same overlay
+data (`examples/berlin.geojson`) over four basemaps.
+
+```sh
+# HERE, with the bundled Berlin overlay:
+export MAPSHOOT_HERE_API_KEY='your-key'   # legacy: HERE_API_KEY
+mapshoot --center 13.405,52.52 --radius 2600 --width 800 --height 450 \
+  --basemap here --here-style explore.day \
+  --geojson examples/berlin.geojson --style examples/berlin-style.json \
+  --output berlin-here.png
+
+# The same data and framing with OpenStreetMap, no key required:
+mapshoot --center 13.405,52.52 --radius 2600 --width 800 --height 450 \
+  --basemap osm \
+  --geojson examples/berlin.geojson --style examples/berlin-style.json \
+  --output berlin-osm.png
+```
+
+Swap `--basemap` and the style flag to compare providers; the basemap, style,
+and key tables are below. The overlay is drawn in the same projected coordinate
+space as the tiles, so points, lines, and polygons line up at every zoom and
+fractional scale.
+
 ## Build
 
 ```sh

@@ -1,6 +1,7 @@
 node_modules/
 /target/
 *.png
+!docs/*.png
 *.jpg
 *.jpeg
 .env
