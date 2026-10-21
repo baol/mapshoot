@@ -1108,6 +1108,121 @@ fn cli_accepts_antimeridian_and_polar_requests() {
 }
 
 #[test]
+fn cli_buffer_and_aspect_ratio() {
+    let dir = std::env::temp_dir();
+    let file = dir.join(format!("mapshoot-cli-frame-{}.png", std::process::id()));
+
+    // The ratio fixes the frame and the box is fitted inside it.
+    let result = cli(&[
+        "--bbox",
+        "0,0,1,1",
+        "--aspect-ratio",
+        "16:9",
+        "--width",
+        "400",
+        "--basemap",
+        "none",
+        "-o",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let image = Pixmap::decode_png(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!((image.width(), image.height()), (400, 225));
+
+    // With only a height, the width follows from the ratio.
+    let result = cli(&[
+        "--bbox",
+        "0,0,1,1",
+        "--aspect-ratio",
+        "2",
+        "--height",
+        "200",
+        "--basemap",
+        "none",
+        "-o",
+        file.to_str().unwrap(),
+    ]);
+    assert!(result.status.success());
+    let image = Pixmap::decode_png(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!((image.width(), image.height()), (400, 200));
+
+    // A buffer grows the area before the height is derived from it.
+    let result = cli(&[
+        "--bbox",
+        "0,0,2,1",
+        "--buffer",
+        "50000",
+        "--width",
+        "400",
+        "--basemap",
+        "none",
+        "-o",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let image = Pixmap::decode_png(&std::fs::read(&file).unwrap()).unwrap();
+    let mut opts = options();
+    opts.bounds = Bounds::new(0.0, 0.0, 2.0, 1.0)
+        .unwrap()
+        .buffered(50_000.0)
+        .unwrap();
+    opts.width = 400;
+    opts.height = None;
+    let view = Viewport::new(&opts).unwrap();
+    assert_eq!(image.width(), view.width);
+    assert_eq!(image.height(), view.height);
+    assert_ne!(image.height(), 200, "the buffer must change the frame");
+    std::fs::remove_file(&file).unwrap();
+
+    let bad_ratios: [&[&str]; 4] = [
+        &[
+            "--bbox",
+            "0,0,1,1",
+            "--width",
+            "400",
+            "--height",
+            "300",
+            "--aspect-ratio",
+            "2",
+            "-o",
+            "-",
+        ],
+        &["--bbox", "0,0,1,1", "--aspect-ratio", "0", "-o", "-"],
+        &["--bbox", "0,0,1,1", "--aspect-ratio", "1:0", "-o", "-"],
+        &["--bbox", "0,0,1,1", "--aspect-ratio", "wide", "-o", "-"],
+    ];
+    for args in bad_ratios {
+        let result = cli(&[args, &["--basemap", "none"]].concat());
+        assert!(!result.status.success(), "{args:?}");
+        let message = String::from_utf8_lossy(&result.stderr);
+        assert!(message.contains("--aspect-ratio"), "{message}");
+    }
+    for value in ["-1", "1000001", "far"] {
+        let result = cli(&[
+            "--bbox",
+            "0,0,1,1",
+            "--buffer",
+            value,
+            "--basemap",
+            "none",
+            "-o",
+            "-",
+        ]);
+        assert!(!result.status.success(), "{value}");
+        let message = String::from_utf8_lossy(&result.stderr);
+        assert!(message.contains("--buffer"), "{message}");
+    }
+}
+
+#[test]
 fn errors_expose_machine_readable_kinds() {
     let mut opts = options();
     opts.style.color = "red".into();

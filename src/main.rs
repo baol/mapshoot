@@ -17,8 +17,10 @@ Usage: mapshoot --bbox west,south,east,north --output map.png [options]
   --attribution TEXT        Required for XYZ; printable ASCII, not HTML
   --geojson FILE            GeoJSON overlay
   --style FILE              JSON: color, fillColor, weight, opacity, fillOpacity, radius
+  --buffer METERS           Expand the box on every side (default: 0)
   --width N                 Image width (default: 1024)
   --height N                Image height (default: follows the box aspect)
+  --aspect-ratio W:H|N      Frame shape; the box is fitted inside
   --pixel-ratio N           Integer output scale 1..4 (default: 1)
   --max-zoom N              Highest tile zoom 0..22 (default: 20)
   --tile-size N             256 or 512, must match provider (default: 256)
@@ -78,6 +80,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--style",
             "--width",
             "--height",
+            "--buffer",
+            "--aspect-ratio",
             "--pixel-ratio",
             "--max-zoom",
             "--tile-size",
@@ -134,6 +138,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => return Err("provide either --bbox or --center with --radius".into()),
     };
+    let buffer = match values.get("--buffer") {
+        Some(value) => value
+            .parse::<f64>()
+            .map_err(|_| format!("--buffer must be a number of meters, got {value:?}"))?,
+        None => 0.0,
+    };
+    let bounds = bounds
+        .buffered(buffer)
+        .map_err(|err| format!("--buffer: {err}"))?;
     let basemap = match values
         .get("--basemap")
         .map(String::as_str)
@@ -179,18 +192,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
     }
-    number!("--width", width);
-    if let Some(value) = values.get("--height") {
-        options.height = Some(
-            value
-                .parse()
-                .map_err(|_| format!("--height must be a number, got {value:?}"))?,
-        );
-    }
     number!("--pixel-ratio", pixel_ratio);
     number!("--max-zoom", max_zoom);
     number!("--tile-size", tile_size);
     number!("--concurrency", concurrency);
+    let ratio = values
+        .get("--aspect-ratio")
+        .map(|v| aspect_ratio(v))
+        .transpose()?;
+    let parse_dimension = |flag: &str, value: &str| -> Result<u32, Box<dyn std::error::Error>> {
+        value
+            .parse()
+            .map_err(|_| format!("{flag} must be a number, got {value:?}").into())
+    };
+    let mut width = values
+        .get("--width")
+        .map(|value| parse_dimension("--width", value))
+        .transpose()?;
+    let mut height = values
+        .get("--height")
+        .map(|value| parse_dimension("--height", value))
+        .transpose()?;
+    if let Some(ratio) = ratio {
+        match (width, height) {
+            (Some(w), Some(h)) => {
+                let expected = ((f64::from(w) / ratio).round() as u32).max(1);
+                if h != expected {
+                    return Err(format!(
+                        "--height {h} does not match --width {w} at the requested --aspect-ratio; omit one of them or use --height {expected}"
+                    )
+                    .into());
+                }
+            }
+            (Some(w), None) => height = Some(((f64::from(w) / ratio).round() as u32).max(1)),
+            (None, Some(h)) => width = Some(((f64::from(h) * ratio).round() as u32).max(1)),
+            (None, None) => {
+                width = Some(1024);
+                height = Some(((1024.0 / ratio).round() as u32).max(1));
+            }
+        }
+    }
+    options.width = width.unwrap_or(1024);
+    options.height = height;
     if let Some(timeout) = values.get("--timeout") {
         options.timeout = Duration::from_millis(
             timeout
@@ -254,6 +297,23 @@ fn write_atomically(path: &str, data: &[u8]) -> Result<(), Box<dyn std::error::E
         let _ = std::fs::remove_file(&temporary);
     }
     result.map_err(|err| format!("cannot write {path}: {err}").into())
+}
+
+/// Parse `W:H` or a plain number into a positive width-to-height ratio.
+fn aspect_ratio(value: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    let invalid = || format!("--aspect-ratio must be W:H or a positive number, got {value:?}");
+    let ratio = match value.split_once(':') {
+        Some((width, height)) => {
+            let width: f64 = width.trim().parse().map_err(|_| invalid())?;
+            let height: f64 = height.trim().parse().map_err(|_| invalid())?;
+            width / height
+        }
+        None => value.trim().parse().map_err(|_| invalid())?,
+    };
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return Err(invalid().into());
+    }
+    Ok(ratio)
 }
 
 fn numbers<const N: usize>(
