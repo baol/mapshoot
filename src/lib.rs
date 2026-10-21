@@ -24,12 +24,45 @@ pub const HERE_STYLES: &[&str] = &[
     "dem",
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// Invalid options, style, attribution or GeoJSON input.
+    InvalidInput,
+    /// The tile provider answered with a non-success HTTP status.
+    Http(u16),
+    /// The request failed before a complete response: DNS, connection, TLS,
+    /// proxy or redirect problems.
+    Network,
+    /// The tile download deadline was exceeded.
+    Timeout,
+    /// Another failure, such as a malformed tile or an internal error.
+    Other,
+}
+
 #[derive(Debug)]
-pub struct Error(String);
+pub struct Error {
+    kind: ErrorKind,
+    message: String,
+}
+
+impl Error {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// Machine-readable category; useful to decide whether a retry may help.
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -37,7 +70,7 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn error(message: impl Into<String>) -> Error {
-    Error(message.into())
+    Error::new(ErrorKind::InvalidInput, message)
 }
 
 /// Coordinates are always longitude, latitude. Antimeridian crossing is rejected.
@@ -101,11 +134,30 @@ pub(crate) fn coordinate(lon: f64, lat: f64) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Basemap {
     None,
     Here { api_key: String, style: String },
     Xyz { url: String, attribution: String },
+}
+
+impl fmt::Debug for Basemap {
+    /// Prints credentials as redacted placeholders.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Here { style, .. } => f
+                .debug_struct("Here")
+                .field("api_key", &"<redacted>")
+                .field("style", style)
+                .finish(),
+            Self::Xyz { attribution, .. } => f
+                .debug_struct("Xyz")
+                .field("url", &"<redacted>")
+                .field("attribution", attribution)
+                .finish(),
+        }
+    }
 }
 
 impl Basemap {
@@ -114,9 +166,7 @@ impl Basemap {
             Self::None => Ok(None),
             Self::Here { api_key, style } => {
                 if api_key.trim().is_empty() {
-                    return Err(error(
-                        "HERE API key is empty; provide a valid api_key or set HERE_API_KEY for the CLI",
-                    ));
+                    return Err(error("HERE API key is empty"));
                 }
                 if !HERE_STYLES.contains(&style.as_str()) {
                     return Err(error(format!("unknown HERE style: {style}")));
@@ -363,7 +413,7 @@ impl Renderer {
             options.width * options.pixel_ratio,
             options.height * options.pixel_ratio,
         )
-        .ok_or_else(|| error("could not allocate output image"))?;
+        .ok_or_else(|| Error::new(ErrorKind::Other, "could not allocate output image"))?;
         image.fill(Color::from_rgba8(221, 221, 221, 255));
         if let Some((url, attribution)) = source {
             tiles::compose(&self.agent, &mut image, &viewport, options, &url).map_err(|err| {
@@ -371,7 +421,7 @@ impl Renderer {
                     Basemap::Here { .. } => "HERE",
                     _ => "XYZ",
                 };
-                error(format!("{provider} basemap failed: {err}"))
+                Error::new(err.kind(), format!("{provider} basemap failed: {err}"))
             })?;
             geojson::draw(&mut image, paths, &options.style, options.pixel_ratio)?;
             tiles::attribution(&mut image, &attribution, options.pixel_ratio)?;

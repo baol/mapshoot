@@ -1,4 +1,6 @@
-use mapshoot::{Basemap, Bounds, MAX_LATITUDE, Options, Renderer, Style, Viewport, render};
+use mapshoot::{
+    Basemap, Bounds, ErrorKind, MAX_LATITUDE, Options, Renderer, Style, Viewport, render,
+};
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -763,6 +765,56 @@ fn cli_write_failures_report_the_path_and_leave_no_temporaries() {
     let message = String::from_utf8_lossy(&result.stderr);
     assert!(message.contains(missing.to_str().unwrap()), "{message}");
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn errors_expose_machine_readable_kinds() {
+    let mut opts = options();
+    opts.style.color = "red".into();
+    assert_eq!(render(&opts).unwrap_err().kind(), ErrorKind::InvalidInput);
+
+    let server = Fixture::new(503, Duration::ZERO, false);
+    assert_eq!(
+        render(&server.options()).unwrap_err().kind(),
+        ErrorKind::Http(503)
+    );
+
+    let server = Fixture::new(200, Duration::ZERO, true);
+    assert_eq!(
+        render(&server.options()).unwrap_err().kind(),
+        ErrorKind::Other
+    );
+
+    let server = Fixture::new(200, Duration::from_millis(200), false);
+    let mut opts = server.options();
+    opts.timeout = Duration::from_millis(50);
+    assert_eq!(render(&opts).unwrap_err().kind(), ErrorKind::Timeout);
+
+    let mut opts = options();
+    opts.basemap = Basemap::Xyz {
+        url: "http://127.0.0.1:1/{z}/{x}/{y}.png".into(),
+        attribution: "Test".into(),
+    };
+    assert_eq!(render(&opts).unwrap_err().kind(), ErrorKind::Network);
+}
+
+#[test]
+fn debug_output_redacts_credentials() {
+    let mut opts = options();
+    opts.basemap = Basemap::Here {
+        api_key: "SECRET-KEY".into(),
+        style: "lite.day".into(),
+    };
+    let debug = format!("{opts:?}");
+    assert!(!debug.contains("SECRET-KEY"), "{debug}");
+    assert!(debug.contains("lite.day"), "{debug}");
+    opts.basemap = Basemap::Xyz {
+        url: "https://tiles.example/SECRET-KEY/{z}/{x}/{y}.png".into(),
+        attribution: "Test".into(),
+    };
+    let debug = format!("{opts:?}");
+    assert!(!debug.contains("SECRET-KEY"), "{debug}");
+    assert!(debug.contains("Test"), "{debug}");
 }
 
 #[test]

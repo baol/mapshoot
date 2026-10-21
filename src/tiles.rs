@@ -68,7 +68,7 @@ pub(crate) fn compose(
     let canceled = AtomicBool::new(false);
     let next = AtomicUsize::new(0);
     let workers = options.concurrency.min(placements.len());
-    let mut failure = None;
+    let mut pending_error = None;
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -86,10 +86,13 @@ pub(crate) fn compose(
                     let result = catch_unwind(AssertUnwindSafe(|| {
                         fetch_tile(agent, url, view.zoom, tile, options.tile_size, deadline)
                     }))
-                    .unwrap_or_else(|_| Err(error("tile worker panicked")));
+                    .unwrap_or_else(|_| Err(failure("tile worker panicked")));
                     // Do not include URLs or HTTP errors: they may contain API keys.
                     let result = result.map_err(|err| {
-                        error(format!("tile {}/{}/{}: {err}", view.zoom, tile.x, tile.y))
+                        crate::Error::new(
+                            err.kind(),
+                            format!("tile {}/{}/{}: {err}", view.zoom, tile.x, tile.y),
+                        )
                     });
                     if result.is_err() {
                         canceled.store(true, Ordering::Release);
@@ -105,17 +108,17 @@ pub(crate) fn compose(
         // no slow tile holds back the rest of the view.
         for (index, result) in receiver {
             match result {
-                Ok(pixels) if failure.is_none() => {
+                Ok(pixels) if pending_error.is_none() => {
                     draw_tile(image, &placements[index].origins, &pixels, ratio);
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    failure.get_or_insert(err);
+                    pending_error.get_or_insert(err);
                 }
             }
         }
     });
-    failure.map_or(Ok(()), Err)
+    pending_error.map_or(Ok(()), Err)
 }
 
 fn draw_tile(image: &mut Pixmap, origins: &[(f32, f32)], pixels: &Pixmap, ratio: f32) {
@@ -145,7 +148,9 @@ fn fetch_tile(
 ) -> Result<Pixmap> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
-        .ok_or_else(|| error("tile download deadline exceeded"))?;
+        .ok_or_else(|| {
+            crate::Error::new(crate::ErrorKind::Timeout, "tile download deadline exceeded")
+        })?;
     let tile_url = template
         .replace("{z}", &zoom.to_string())
         .replace("{x}", &tile.x.to_string())
@@ -177,7 +182,7 @@ fn fetch(
         .read_to_end(&mut data)
         .map_err(|err| http_error(err.into()))?;
     if data.len() > 8 * 1024 * 1024 {
-        return Err(error("tile exceeds 8 MiB"));
+        return Err(failure("tile exceeds 8 MiB"));
     }
     if data.len() < 24
         || &data[..8] != b"\x89PNG\r\n\x1a\n"
@@ -185,20 +190,21 @@ fn fetch(
         || u32::from_be_bytes(
             data[16..20]
                 .try_into()
-                .map_err(|_| error("invalid PNG header"))?,
+                .map_err(|_| failure("invalid PNG header"))?,
         ) != size
         || u32::from_be_bytes(
             data[20..24]
                 .try_into()
-                .map_err(|_| error("invalid PNG header"))?,
+                .map_err(|_| failure("invalid PNG header"))?,
         ) != size
     {
-        return Err(error(format!("expected a {size}x{size} PNG tile")));
+        return Err(failure(format!("expected a {size}x{size} PNG tile")));
     }
-    Pixmap::decode_png(&data).map_err(|_| error("invalid PNG tile data"))
+    Pixmap::decode_png(&data).map_err(|_| failure("invalid PNG tile data"))
 }
 
 fn http_error(err: ureq::Error) -> crate::Error {
+    use crate::{Error, ErrorKind};
     match err {
         ureq::Error::StatusCode(status) => {
             let hint = match status {
@@ -208,28 +214,42 @@ fn http_error(err: ureq::Error) -> crate::Error {
                 500..=599 => "tile provider unavailable; retry later",
                 _ => "tile provider rejected the request",
             };
-            error(format!("HTTP {status}: {hint}"))
+            Error::new(ErrorKind::Http(status), format!("HTTP {status}: {hint}"))
         }
-        ureq::Error::Timeout(stage) => error(format!("HTTP timeout ({stage:?})")),
-        ureq::Error::Io(err) => error(format!("HTTP I/O failure ({:?})", err.kind())),
-        ureq::Error::HostNotFound => error("HTTP hostname could not be resolved"),
-        ureq::Error::BadUri(_) | ureq::Error::Http(_) => error("invalid tile URL"),
-        ureq::Error::Protocol(_) => error("invalid HTTP response"),
+        ureq::Error::Timeout(stage) => {
+            Error::new(ErrorKind::Timeout, format!("HTTP timeout ({stage:?})"))
+        }
+        ureq::Error::Io(err) => Error::new(
+            ErrorKind::Network,
+            format!("HTTP I/O failure ({:?})", err.kind()),
+        ),
+        ureq::Error::HostNotFound => network("HTTP hostname could not be resolved"),
+        ureq::Error::BadUri(_) | ureq::Error::Http(_) => network("invalid tile URL"),
+        ureq::Error::Protocol(_) => network("invalid HTTP response"),
         ureq::Error::Rustls(_) | ureq::Error::Tls(_) | ureq::Error::TlsRequired => {
-            error("TLS negotiation failed")
+            network("TLS negotiation failed")
         }
         ureq::Error::InvalidProxyUrl | ureq::Error::ConnectProxyFailed(_) => {
-            error("HTTP proxy failed")
+            network("HTTP proxy failed")
         }
         ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed => {
-            error("HTTP redirect failed")
+            network("HTTP redirect failed")
         }
-        ureq::Error::ConnectionFailed => error("HTTP connection failed"),
+        ureq::Error::ConnectionFailed => network("HTTP connection failed"),
         ureq::Error::BodyExceedsLimit(_) | ureq::Error::LargeResponseHeader(_, _) => {
-            error("HTTP response exceeds size limits")
+            network("HTTP response exceeds size limits")
         }
-        _ => error("HTTP transport failed"),
+        _ => network("HTTP transport failed"),
     }
+}
+
+fn network(message: impl Into<String>) -> crate::Error {
+    crate::Error::new(crate::ErrorKind::Network, message)
+}
+
+/// A provider or internal failure, as opposed to invalid user input.
+fn failure(message: impl Into<String>) -> crate::Error {
+    crate::Error::new(crate::ErrorKind::Other, message)
 }
 
 pub(crate) fn validate_attribution(text: &str, width: u32, height: u32) -> Result<()> {

@@ -169,6 +169,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `render(&options)` is also available as a one-shot function.
 The returned tiny-skia Pixmap can be encoded in memory or further drawn upon.
 
+Errors are `mapshoot::Error`. Besides the `Display` message they expose
+`Error::kind()`: `InvalidInput`, `Http(status)`, `Network`, `Timeout` or
+`Other`, so callers can decide whether a retry may help. `Debug` for `Basemap`
+and `Options` redacts API keys and tile URLs, so options can be logged safely.
+
 ## Migration from the browser prototype
 
 This replaces the Node/Leaflet/Playwright implementation, not a second backend.
