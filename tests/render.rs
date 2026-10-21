@@ -453,15 +453,9 @@ fn world_wrap_and_polar_background_do_not_request_invalid_tiles() {
     assert_eq!(rgb(&image, 10, 256), [0, 0, 50]);
     assert_eq!(rgb(&image, 500, 256), [0, 0, 50]);
     assert_eq!(rgb(&image, 256, 10), [221, 221, 221]);
-    assert!(
-        server
-            .log
-            .paths
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|p| p == "/0/0/0.png")
-    );
+    // The one tile needed for the whole row is requested exactly once, then
+    // reused at both world offsets.
+    assert_eq!(*server.log.paths.lock().unwrap(), ["/0/0/0.png"]);
 }
 
 #[test]
@@ -489,7 +483,7 @@ fn request_errors_invalid_tiles_and_timeouts_are_explicit_and_redacted() {
 }
 
 #[test]
-fn deadline_covers_multiple_batches_not_just_individual_requests() {
+fn deadline_covers_all_tile_requests_not_just_individual_ones() {
     let server = Fixture::new(200, Duration::from_millis(70), false);
     let mut opts = server.options();
     opts.concurrency = 1;

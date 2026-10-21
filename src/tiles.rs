@@ -1,12 +1,24 @@
 use crate::{Options, Result, Viewport, error};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
+use std::collections::HashMap;
 use std::io::Read;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use tiny_skia::{Color, FilterQuality, Paint, Pixmap, PixmapPaint, Rect, Transform};
 
+#[derive(Clone, Copy)]
 struct Tile {
+    /// Wrapped tile column, as used in the request URL and error messages.
     x: i64,
     y: i64,
+}
+
+/// One tile request and every position where its pixels are used.
+struct Placement {
+    tile: Tile,
+    /// Device-pixel positions, several when the view is wider than the world.
+    origins: Vec<(f32, f32)>,
 }
 
 pub(crate) fn compose(
@@ -22,69 +34,123 @@ pub(crate) fn compose(
     let right = ((view.left + f64::from(options.width)) / size).ceil() as i64;
     let top = ((view.top / size).floor() as i64).max(0);
     let bottom = (((view.top + f64::from(options.height)) / size).ceil() as i64).min(count);
-    let mut tiles = Vec::new();
+    let ratio = options.pixel_ratio as f32;
+    let mut placements: Vec<Placement> = Vec::new();
+    let mut slots: HashMap<(i64, i64), usize> = HashMap::new();
+    let mut placements_count = 0_usize;
     for y in top..bottom {
         for x in left..right {
-            tiles.push(Tile { x, y });
+            placements_count += 1;
+            let tile = Tile {
+                x: x.rem_euclid(count),
+                y,
+            };
+            let origin = (
+                (x as f64 * size - view.left) as f32 * ratio,
+                (y as f64 * size - view.top) as f32 * ratio,
+            );
+            let index = *slots.entry((tile.x, tile.y)).or_insert_with(|| {
+                placements.push(Placement {
+                    tile,
+                    origins: Vec::new(),
+                });
+                placements.len() - 1
+            });
+            placements[index].origins.push(origin);
         }
     }
-    if tiles.len() > 2048 {
+    if placements_count > 2048 {
         return Err(error(
             "viewport requires more than 2048 tiles; reduce dimensions",
         ));
     }
     let deadline = Instant::now() + options.timeout;
-    // Batches bound both concurrent requests and decoded tile memory.
-    for batch in tiles.chunks(options.concurrency) {
-        let results = std::thread::scope(|scope| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|tile| {
-                    scope.spawn(move || {
-                        let remaining = deadline
-                            .checked_duration_since(Instant::now())
-                            .ok_or_else(|| error("tile download deadline exceeded"))?;
-                        let tile_url = url
-                            .replace("{z}", &view.zoom.to_string())
-                            .replace("{x}", &tile.x.rem_euclid(count).to_string())
-                            .replace("{y}", &tile.y.to_string());
-                        let result = fetch(agent, &tile_url, options.tile_size, remaining);
-                        // Do not include URLs or HTTP errors: they may contain API keys.
-                        result.map_err(|err| {
-                            error(format!(
-                                "tile {}/{}/{}: {err}",
-                                view.zoom,
-                                tile.x.rem_euclid(count),
-                                tile.y
-                            ))
-                        })
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().map_err(|_| error("tile worker panicked"))?)
-                .collect::<Result<Vec<_>>>()
-        })?;
-        for (tile, pixels) in batch.iter().zip(results.iter()) {
-            let ratio = options.pixel_ratio as f32;
-            let x = (tile.x as f64 * size - view.left) as f32 * ratio;
-            let y = (tile.y as f64 * size - view.top) as f32 * ratio;
-            let paint = PixmapPaint {
-                quality: FilterQuality::Nearest,
-                ..PixmapPaint::default()
-            };
-            image.draw_pixmap(
-                0,
-                0,
-                pixels.as_ref(),
-                &paint,
-                Transform::from_row(ratio, 0.0, 0.0, ratio, x, y),
-                None,
-            );
+    let canceled = AtomicBool::new(false);
+    let next = AtomicUsize::new(0);
+    let workers = options.concurrency.min(placements.len());
+    let mut failure = None;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let canceled = &canceled;
+            let next = &next;
+            let placements = &placements;
+            scope.spawn(move || {
+                while !canceled.load(Ordering::Acquire) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(placement) = placements.get(index) else {
+                        return;
+                    };
+                    let tile = placement.tile;
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        fetch_tile(agent, url, view.zoom, tile, options.tile_size, deadline)
+                    }))
+                    .unwrap_or_else(|_| Err(error("tile worker panicked")));
+                    // Do not include URLs or HTTP errors: they may contain API keys.
+                    let result = result.map_err(|err| {
+                        error(format!("tile {}/{}/{}: {err}", view.zoom, tile.x, tile.y))
+                    });
+                    if result.is_err() {
+                        canceled.store(true, Ordering::Release);
+                    }
+                    if sender.send((index, result)).is_err() {
+                        return;
+                    }
+                }
+            });
         }
+        drop(sender);
+        // Draw as tiles arrive: memory stays bounded by the worker count and
+        // no slow tile holds back the rest of the view.
+        for (index, result) in receiver {
+            match result {
+                Ok(pixels) if failure.is_none() => {
+                    draw_tile(image, &placements[index].origins, &pixels, ratio);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    failure.get_or_insert(err);
+                }
+            }
+        }
+    });
+    failure.map_or(Ok(()), Err)
+}
+
+fn draw_tile(image: &mut Pixmap, origins: &[(f32, f32)], pixels: &Pixmap, ratio: f32) {
+    let paint = PixmapPaint {
+        quality: FilterQuality::Nearest,
+        ..PixmapPaint::default()
+    };
+    for &(x, y) in origins {
+        image.draw_pixmap(
+            0,
+            0,
+            pixels.as_ref(),
+            &paint,
+            Transform::from_row(ratio, 0.0, 0.0, ratio, x, y),
+            None,
+        );
     }
-    Ok(())
+}
+
+fn fetch_tile(
+    agent: &ureq::Agent,
+    template: &str,
+    zoom: u8,
+    tile: Tile,
+    size: u32,
+    deadline: Instant,
+) -> Result<Pixmap> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| error("tile download deadline exceeded"))?;
+    let tile_url = template
+        .replace("{z}", &zoom.to_string())
+        .replace("{x}", &tile.x.to_string())
+        .replace("{y}", &tile.y.to_string());
+    fetch(agent, &tile_url, size, remaining)
 }
 
 fn fetch(
