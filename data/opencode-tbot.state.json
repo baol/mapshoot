@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "sessions": {
+    "32291958": {
+      "chatId": 32291958,
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "projectId": "3ec63439674c23b6ed0e753429d369782e0d0bd1",
+      "directory": "/home/mirko/dev/mapshoot",
+      "agentName": null,
+      "modelProviderId": "openrouter",
+      "modelId": "deepseek/deepseek-v4.1-flash-1017",
+      "modelVariant": "low",
+      "language": null,
+      "updatedAt": "2026-10-21T13:52:41.177Z"
+    }
+  },
+  "pendingActions": {},
+  "pendingPermissions": {
+    "per_15eb7bf5d001Tsq4tp41g2DO1Y:32291958": {
+      "requestId": "per_15eb7bf5d001Tsq4tp41g2DO1Y",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 9,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:47:55.024Z"
+    },
+    "per_15eb7bf5f001vOEVpJ9u5x0s4G:32291958": {
+      "requestId": "per_15eb7bf5f001vOEVpJ9u5x0s4G",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 10,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:47:58.374Z"
+    },
+    "per_15eb80bc7001Ki4QHbLyVVh70D:32291958": {
+      "requestId": "per_15eb80bc7001Ki4QHbLyVVh70D",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 11,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:08.820Z"
+    },
+    "per_15eb80bc80011vC5cjEiJ8Q6hh:32291958": {
+      "requestId": "per_15eb80bc80011vC5cjEiJ8Q6hh",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 12,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:05.097Z"
+    },
+    "per_15eb84008001pALvoMB9E9eYZt:32291958": {
+      "requestId": "per_15eb84008001pALvoMB9E9eYZt",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 13,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:30.751Z"
+    },
+    "per_15eb84008003sB2EP4GZMloE5Q:32291958": {
+      "requestId": "per_15eb84008003sB2EP4GZMloE5Q",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 14,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:19.229Z"
+    },
+    "per_15eb884fc0012Eq8PCEVvjJrIE:32291958": {
+      "requestId": "per_15eb884fc0012Eq8PCEVvjJrIE",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 15,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:38.635Z"
+    },
+    "per_15eb884fd001hjS62yo0EYg02M:32291958": {
+      "requestId": "per_15eb884fd001hjS62yo0EYg02M",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 16,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:35.558Z"
+    },
+    "per_15eb8a994001Hr3iEwORXal1qn:32291958": {
+      "requestId": "per_15eb8a994001Hr3iEwORXal1qn",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 17,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:44.207Z"
+    },
+    "per_15eb8c0b4001t29a4dG3MZRaQP:32291958": {
+      "requestId": "per_15eb8c0b4001t29a4dG3MZRaQP",
+      "sessionId": "ses_ea1484b04ffe7XxfUQLdp6mH17",
+      "chatId": 32291958,
+      "messageId": 18,
+      "status": "always",
+      "updatedAt": "2026-10-21T13:48:50.150Z"
+    }
+  }
+}
