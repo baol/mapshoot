@@ -25,7 +25,7 @@ fn array(value: &Value) -> Result<&Vec<Value>> {
         .ok_or_else(|| error("invalid GeoJSON: expected an array"))
 }
 
-fn position(value: &Value, view: &Viewport, ratio: u32) -> Result<(f32, f32)> {
+fn position(value: &Value) -> Result<(f64, f64)> {
     let values = array(value)?;
     if values.len() < 2 || !values.iter().all(Value::is_number) {
         return Err(error(
@@ -39,7 +39,13 @@ fn position(value: &Value, view: &Viewport, ratio: u32) -> Result<(f32, f32)> {
         .as_f64()
         .ok_or_else(|| error("invalid latitude"))?;
     coordinate(lon, lat)?;
-    Ok(view.point(lon, lat, ratio))
+    Ok((lon, lat))
+}
+
+/// Longitude step in (-180, 180]: the shortest way around the globe.
+fn shortest_delta(from: f64, to: f64) -> f64 {
+    let delta = (to - from).rem_euclid(360.0);
+    if delta > 180.0 { delta - 360.0 } else { delta }
 }
 
 fn line(
@@ -55,18 +61,34 @@ fn line(
             "invalid GeoJSON: lines need 2 positions, rings need 4",
         ));
     }
-    let first = position(&points[0], view, ratio)?;
-    builder.move_to(first.0, first.1);
-    for point in &points[1..] {
-        let (x, y) = position(point, view, ratio)?;
+    let first = position(&points[0])?;
+    if ring {
+        let last = position(points.last().ok_or_else(|| error("empty ring"))?)?;
+        if first.0 != last.0 || first.1 != last.1 {
+            return Err(error("invalid GeoJSON: polygon rings must be closed"));
+        }
+    }
+    // Every vertex uses the same world copy; consecutive longitudes are
+    // unwrapped so each segment takes the shortest route around the globe.
+    let copy = view.nearest_copy(first.0);
+    let (x, y) = view.point_in_copy(first.0, first.1, copy, ratio);
+    builder.move_to(x, y);
+    let interior = if ring {
+        &points[1..points.len() - 1]
+    } else {
+        &points[1..]
+    };
+    let mut previous = first.0;
+    for point in interior {
+        let (lon, lat) = position(point)?;
+        let lon = previous + shortest_delta(previous, lon);
+        previous = lon;
+        let (x, y) = view.point_in_copy(lon, lat, copy, ratio);
         builder.line_to(x, y);
     }
     if ring {
-        let start = array(&points[0])?;
-        let end = array(points.last().ok_or_else(|| error("empty ring"))?)?;
-        if start[0].as_f64() != end[0].as_f64() || start[1].as_f64() != end[1].as_f64() {
-            return Err(error("invalid GeoJSON: polygon rings must be closed"));
-        }
+        // The closing edge runs from the last distinct vertex back to the
+        // first one, again over the shortest route.
         builder.close();
     }
     Ok(())
@@ -110,7 +132,8 @@ fn visit(
             }
         }
         "Point" => {
-            let (x, y) = position(&value["coordinates"], view, ratio)?;
+            let (lon, lat) = position(&value["coordinates"])?;
+            let (x, y) = view.point(lon, lat, ratio);
             out.push(Shape::Point(x, y));
         }
         "MultiPoint" | "MultiLineString" | "MultiPolygon" => {
@@ -160,6 +183,7 @@ pub(crate) fn draw(
     image: &mut Pixmap,
     shapes: Vec<Shape>,
     style: &Style,
+    view: &Viewport,
     ratio: u32,
 ) -> Result<()> {
     let mut fill = Paint::default();
@@ -175,6 +199,8 @@ pub(crate) fn draw(
         line_join: LineJoin::Round,
         ..Stroke::default()
     };
+    let world = view.world_size * f64::from(ratio);
+    let width = f64::from(image.width());
     for shape in shapes {
         let (path, should_fill) = match shape {
             Shape::Point(x, y) => {
@@ -189,11 +215,19 @@ pub(crate) fn draw(
             }
             Shape::Path { path, fill } => (path, fill),
         };
-        if should_fill {
-            image.fill_path(&path, &fill, FillRule::EvenOdd, Transform::identity(), None);
-        }
-        if style.weight > 0.0 {
-            image.stroke_path(&path, &stroke_paint, &stroke, Transform::identity(), None);
+        // Draw every repetition of the world that overlaps the image, so a
+        // shape crossing the antimeridian continues on the other side.
+        let bounds = path.bounds();
+        let first = ((-f64::from(bounds.right())) / world).ceil() as i64;
+        let last = ((width - f64::from(bounds.left())) / world).floor() as i64;
+        for copy in first..=last {
+            let transform = Transform::from_translate((copy as f64 * world) as f32, 0.0);
+            if should_fill {
+                image.fill_path(&path, &fill, FillRule::EvenOdd, transform, None);
+            }
+            if style.weight > 0.0 {
+                image.stroke_path(&path, &stroke_paint, &stroke, transform, None);
+            }
         }
     }
     Ok(())

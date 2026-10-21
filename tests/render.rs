@@ -890,6 +890,52 @@ fn antimeridian_crossing_views_wrap_tiles_and_overlays() {
 }
 
 #[test]
+fn antimeridian_segments_take_the_shortest_path() {
+    let mut opts = options();
+    opts.width = 512;
+    opts.height = 512;
+    opts.padding = 0;
+    opts.max_zoom = 1;
+    opts.bounds = Bounds::new(-180.0, -85.0, 180.0, 85.0).unwrap();
+    opts.geojson = Some(json!({"type": "LineString", "coordinates": [[170, 0], [-170, 0]]}));
+    opts.style = Style {
+        color: "#ff0000".into(),
+        weight: 4.0,
+        ..Style::default()
+    };
+    let view = Viewport::new(&opts).unwrap();
+    assert_eq!(view.zoom, 1);
+    let image = render(&opts).unwrap();
+    // 170E to 170W is 20 degrees across the dateline, not 340 degrees across
+    // the map: the line appears at both world edges and not in the middle.
+    assert_eq!(rgb(&image, 5, 256), [255, 0, 0]);
+    assert_eq!(rgb(&image, 506, 256), [255, 0, 0]);
+    assert_eq!(rgb(&image, 256, 256), [221, 221, 221]);
+}
+
+#[test]
+fn antimeridian_polygons_stay_in_one_piece() {
+    let mut opts = options();
+    opts.width = 512;
+    opts.height = 512;
+    opts.padding = 0;
+    opts.bounds = Bounds::new(170.0, -5.0, -170.0, 5.0).unwrap();
+    opts.geojson = Some(json!({"type": "Polygon", "coordinates": [
+        [[179, -1], [-179, -1], [-179, 1], [179, 1], [179, -1]]
+    ]}));
+    opts.style = Style {
+        color: "#0000ff".into(),
+        fill_opacity: 1.0,
+        weight: 0.0,
+        ..Style::default()
+    };
+    let center = Viewport::new(&opts).unwrap().point(180.0, 0.0, 1);
+    let image = render(&opts).unwrap();
+    assert_eq!(rgb(&image, center.0 as u32, center.1 as u32), [0, 0, 255]);
+    assert_eq!(rgb(&image, 50, 256), [221, 221, 221]);
+}
+
+#[test]
 fn polar_views_clip_to_the_mercator_edge() {
     let mut opts = options();
     opts.bounds = Bounds::new(-10.0, 80.0, 10.0, 89.0).unwrap();

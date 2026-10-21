@@ -58,9 +58,9 @@ north**. Radius is in meters, using a spherical Earth bounding box. A bbox with
 automatically. Latitude accepts -90..90; parts of the area beyond the Web
 Mercator limit (+/-85.05112878 degrees) are clipped to the edge of the world and
 show the background color there. GeoJSON coordinates use the same limits and
-clamp to the world edge. Line and polygon segments crossing the antimeridian are
-not unwrapped and take the long way around. Radius must be positive and at most
-1,000 km.
+clamp to the world edge. Line and polygon segments take the shortest route
+around the globe, and shapes crossing the antimeridian are drawn on both sides
+of the map. Radius must be positive and at most 1,000 km.
 
 The renderer chooses the highest integer zoom that fits the requested area,
 centers it, and crops the tiles to the output. Aspect ratio, padding, integer

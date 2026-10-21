@@ -413,12 +413,31 @@ impl Viewport {
     }
 
     pub fn point(&self, longitude: f64, latitude: f64, pixel_ratio: u32) -> (f32, f32) {
+        self.point_in_copy(
+            longitude,
+            latitude,
+            self.nearest_copy(longitude),
+            pixel_ratio,
+        )
+    }
+
+    /// Index of the world repetition nearest the view center for a longitude.
+    pub(crate) fn nearest_copy(&self, longitude: f64) -> f64 {
+        let (x, _) = project(longitude, 0.0, self.world_size);
+        ((self.left + self.width / 2.0 - x) / self.world_size).round()
+    }
+
+    /// Pixel position in a specific world repetition; `longitude` may exceed
+    /// +/-180 after unwrapping a segment.
+    pub(crate) fn point_in_copy(
+        &self,
+        longitude: f64,
+        latitude: f64,
+        copy: f64,
+        pixel_ratio: u32,
+    ) -> (f32, f32) {
         let (x, y) = project(longitude, latitude, self.world_size);
-        // Use the copy of the world nearest the view center, so features on
-        // either side of the antimeridian land inside a wrapping view while
-        // ordinary off-screen features stay off screen.
-        let copies = ((self.left + self.width / 2.0 - x) / self.world_size).round();
-        let x = x + copies * self.world_size;
+        let x = x + copy * self.world_size;
         (
             ((x - self.left) * f64::from(pixel_ratio)) as f32,
             ((y - self.top) * f64::from(pixel_ratio)) as f32,
@@ -470,10 +489,22 @@ impl Renderer {
                 };
                 Error::new(err.kind(), format!("{provider} basemap failed: {err}"))
             })?;
-            geojson::draw(&mut image, paths, &options.style, options.pixel_ratio)?;
+            geojson::draw(
+                &mut image,
+                paths,
+                &options.style,
+                &viewport,
+                options.pixel_ratio,
+            )?;
             tiles::attribution(&mut image, &attribution, options.pixel_ratio)?;
         } else {
-            geojson::draw(&mut image, paths, &options.style, options.pixel_ratio)?;
+            geojson::draw(
+                &mut image,
+                paths,
+                &options.style,
+                &viewport,
+                options.pixel_ratio,
+            )?;
         }
         Ok(image)
     }
