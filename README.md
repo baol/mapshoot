@@ -89,8 +89,12 @@ HTTP status hints. No image is written on download failure; existing files are
 preserved. Missing HERE credentials are an error, not an offline fallback.
 
 The output directory must exist. Rendering and PNG encoding complete before the
-output file is opened, so tile/overlay errors do not overwrite an existing image.
+output file is opened, and files are written to a temporary file and renamed
+into place, so neither a failed render nor a failed write truncates an existing
+image. Errors name the offending option or file. Options accept `--flag VALUE`
+or `--flag=VALUE`; the latter is required for values that start with `--`.
 The timeout covers network work, not JSON parsing, rendering or PNG encoding.
+Closing stdout early (`mapshoot ... -o - | head`) is not an error.
 
 ### HERE styles and attribution
 

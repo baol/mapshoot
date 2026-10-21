@@ -1,5 +1,10 @@
 use mapshoot::{Basemap, Bounds, Options, Renderer, Style};
-use std::{collections::BTreeMap, io::Write, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io::{ErrorKind, Write},
+    path::Path,
+    time::Duration,
+};
 
 const HELP: &str = "\
 Usage: mapshoot --bbox west,south,east,north --output map.png [options]
@@ -22,6 +27,7 @@ Usage: mapshoot --bbox west,south,east,north --output map.png [options]
   --help, -h                Show help
   --version                 Show version
 
+Options accept --flag VALUE or --flag=VALUE.
 Coordinates are longitude,latitude. Radius is in meters. PNG output only.
 ";
 
@@ -35,8 +41,8 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut values = BTreeMap::new();
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
             "--help" | "-h" => {
                 print!("{HELP}");
                 return Ok(());
@@ -47,6 +53,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => {}
         }
+        let (flag, inline) = match argument.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => {
+                (flag.to_string(), Some(value.to_string()))
+            }
+            _ => (argument, None),
+        };
         let flag = if flag == "-o" {
             "--output".into()
         } else {
@@ -76,12 +88,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             return Err(format!("unknown option {flag}; use --help").into());
         }
-        let value = args
-            .next()
-            .ok_or_else(|| format!("missing value for {flag}"))?;
-        if value.starts_with("--") {
-            return Err(format!("missing value for {flag}").into());
-        }
+        let value = match inline {
+            Some(value) => value,
+            None => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("missing value for {flag}"))?;
+                if value.starts_with("--") {
+                    return Err(format!(
+                        "missing value for {flag}; use {flag}=VALUE for a value starting with --"
+                    )
+                    .into());
+                }
+                value
+            }
+        };
         if values.insert(flag.clone(), value).is_some() {
             return Err(format!("duplicate option {flag}").into());
         }
@@ -101,12 +122,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         values.get("--radius"),
     ) {
         (Some(bbox), None, None) => {
-            let b = numbers::<4>(bbox)?;
+            let b = numbers::<4>("--bbox", bbox)?;
             Bounds::new(b[0], b[1], b[2], b[3])?
         }
         (None, Some(center), Some(radius)) => {
-            let c = numbers::<2>(center)?;
-            Bounds::from_center(c[0], c[1], radius.parse()?)?
+            let c = numbers::<2>("--center", center)?;
+            let radius = radius
+                .parse()
+                .map_err(|_| format!("--radius must be a number of meters, got {radius:?}"))?;
+            Bounds::from_center(c[0], c[1], radius)?
         }
         _ => return Err("provide either --bbox or --center with --radius".into()),
     };
@@ -151,7 +175,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(value) = values.get($flag) {
                 options.$field = value
                     .parse()
-                    .map_err(|_| format!("invalid value for {}", $flag))?;
+                    .map_err(|_| format!("{} must be a number, got {:?}", $flag, value))?;
             }
         };
     }
@@ -163,13 +187,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     number!("--tile-size", tile_size);
     number!("--concurrency", concurrency);
     if let Some(timeout) = values.get("--timeout") {
-        options.timeout = Duration::from_millis(timeout.parse().map_err(|_| "invalid --timeout")?);
+        options.timeout = Duration::from_millis(
+            timeout
+                .parse()
+                .map_err(|_| format!("--timeout must be whole milliseconds, got {timeout:?}"))?,
+        );
     }
     if let Some(file) = values.get("--geojson") {
-        options.geojson = Some(serde_json::from_reader(std::fs::File::open(file)?)?);
+        options.geojson = Some(read_json("--geojson", file)?);
     }
     if let Some(file) = values.get("--style") {
-        options.style = serde_json::from_reader::<_, Style>(std::fs::File::open(file)?)?;
+        options.style = read_json::<Style>("--style", file)?;
     }
     if matches!(options.basemap, Basemap::None) {
         eprintln!(
@@ -179,20 +207,60 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let image = Renderer::default().render(&options)?;
     let png = image.encode_png()?;
     if output == "-" {
-        std::io::stdout().lock().write_all(&png)?;
+        let mut stdout = std::io::stdout().lock();
+        if let Err(err) = stdout.write_all(&png).and_then(|()| stdout.flush()) {
+            // The consumer went away (`mapshoot ... | head`): nothing to report.
+            if err.kind() == ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+            return Err(err.into());
+        }
     } else {
-        std::fs::write(output, png)?;
+        write_atomically(output, &png)?;
         eprintln!("Saved {output}");
     }
     Ok(())
 }
 
-fn numbers<const N: usize>(value: &str) -> Result<[f64; N], Box<dyn std::error::Error>> {
+fn read_json<T: serde::de::DeserializeOwned>(
+    flag: &str,
+    path: &str,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(path).map_err(|err| format!("{flag} {path}: {err}"))?;
+    serde_json::from_reader(file).map_err(|err| format!("{flag} {path}: {err}").into())
+}
+
+/// Write next to the destination and rename, so a failed write never leaves a
+/// truncated or partially written image behind.
+fn write_atomically(path: &str, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let destination = Path::new(path);
+    let name = destination
+        .file_name()
+        .ok_or("--output must name a file")?
+        .to_string_lossy();
+    let temporary = destination.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(data)?;
+        drop(file);
+        std::fs::rename(&temporary, destination)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|err| format!("cannot write {path}: {err}").into())
+}
+
+fn numbers<const N: usize>(
+    flag: &str,
+    value: &str,
+) -> Result<[f64; N], Box<dyn std::error::Error>> {
     let values: Vec<f64> = value
         .split(',')
         .map(|part| part.trim().parse())
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("{flag} expects {N} comma-separated numbers, got {value:?}"))?;
     values
         .try_into()
-        .map_err(|_| format!("expected {N} comma-separated coordinates").into())
+        .map_err(|_| format!("{flag} expects {N} comma-separated numbers, got {value:?}").into())
 }

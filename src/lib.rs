@@ -267,13 +267,11 @@ impl Options {
         if self.max_zoom > 22 || ![256, 512].contains(&self.tile_size) {
             return Err(error("max-zoom must be 0..22 and tile-size 256 or 512"));
         }
-        if !(1..=32).contains(&self.concurrency)
-            || self.timeout.is_zero()
-            || self.timeout > Duration::from_secs(300)
-        {
-            return Err(error(
-                "concurrency must be 1..32 and timeout 1..300000 milliseconds",
-            ));
+        if !(1..=32).contains(&self.concurrency) {
+            return Err(error("concurrency must be 1..32"));
+        }
+        if self.timeout.is_zero() || self.timeout > Duration::from_secs(300) {
+            return Err(error("timeout must be 1..300000 milliseconds"));
         }
         self.style.validate()
     }

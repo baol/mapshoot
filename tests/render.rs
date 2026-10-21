@@ -647,6 +647,125 @@ fn cli_basemap_errors_do_not_create_or_overwrite_images() {
 }
 
 #[test]
+fn cli_errors_name_the_offending_option_or_file() {
+    let missing =
+        std::env::temp_dir().join(format!("mapshoot-missing-{}.geojson", std::process::id()));
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "none",
+        "--geojson",
+        missing.to_str().unwrap(),
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("--geojson"), "{message}");
+    assert!(message.contains(missing.to_str().unwrap()), "{message}");
+
+    let manifest = std::env::temp_dir().join(format!("mapshoot-bad-{}.json", std::process::id()));
+    std::fs::write(&manifest, r##"{"fillColorr":"#fff"}"##).unwrap();
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "none",
+        "--style",
+        manifest.to_str().unwrap(),
+        "-o",
+        "-",
+    ]);
+    std::fs::remove_file(&manifest).unwrap();
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("--style"), "{message}");
+    assert!(message.contains(manifest.to_str().unwrap()), "{message}");
+    assert!(message.contains("unknown field"), "{message}");
+
+    let result = cli(&["--bbox", "abc", "--basemap", "none", "-o", "-"]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("--bbox"), "{message}");
+    assert!(message.contains("4 comma-separated numbers"), "{message}");
+
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "none",
+        "--timeout",
+        "0",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("timeout must be 1..300000"), "{message}");
+    assert!(!message.contains("concurrency"), "{message}");
+
+    // Values that start with -- are reachable with the --flag=value form.
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "xyz",
+        "--tile-url",
+        "http://127.0.0.1:1/{z}/{x}/{y}.png",
+        "--attribution=--not-a-flag",
+        "-o",
+        "-",
+    ]);
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(!message.contains("missing value"), "{message}");
+    assert!(message.contains("XYZ basemap failed"), "{message}");
+}
+
+#[test]
+fn cli_write_failures_report_the_path_and_leave_no_temporaries() {
+    let directory = std::env::temp_dir().join(format!("mapshoot-atomic-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let destination = directory.join("map.png");
+    std::fs::create_dir_all(&destination).unwrap();
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "none",
+        "-o",
+        destination.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains(destination.to_str().unwrap()), "{message}");
+    assert!(destination.is_dir());
+    let entries: Vec<_> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        [std::ffi::OsString::from("map.png")],
+        "{entries:?}"
+    );
+
+    let missing = directory.join("missing").join("map.png");
+    let result = cli(&[
+        "--bbox",
+        "13.37,52.50,13.44,52.54",
+        "--basemap",
+        "none",
+        "-o",
+        missing.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains(missing.to_str().unwrap()), "{message}");
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
 fn renderer_is_reusable_after_errors() {
     let renderer = Renderer::default();
     let mut invalid = options();
