@@ -73,7 +73,7 @@ south of the Web Mercator world retain the background color.
 | `--pixel-ratio` | Integer 1..4; scales dimensions and overlays, not tile detail |
 | `--padding` | 20 logical pixels |
 | `--max-zoom` | 20; allowed 0..22, set to provider's supported maximum |
-| `--tile-size` | 256; accepts 256 or 512, must match returned tile dimensions |
+| `--tile-size` | 256; accepts 256 or 512 and is sent to HERE as the tile `size`, must match returned tile dimensions |
 | `--concurrency` | 8 parallel tile requests; allowed 1..32 |
 | `--timeout` | 15000 ms total deadline for the tile download phase |
 | `--output`, `-o` | Required `.png` path or `-` for stdout |
@@ -98,9 +98,14 @@ The timeout covers network work, not JSON parsing, rendering or PNG encoding.
 `lite.satellite.day`, `logistics.day`, `logistics.night`,
 `logistics.satellite.day`, `satellite.day`, `topo.day`, `topo.night`, `dem`.
 
-HERE uses the supplied `maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png` templates.
+HERE uses the supplied `maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png` templates
+with `style` and `size` query parameters.
 A valid key and appropriate account permissions are required. Tests use local
 tiles; live HERE requests are not part of automated validation.
+
+All requests carry a `mapshoot/<version>` `User-Agent`. Providers such as
+OpenStreetMap require an identifiable agent; library users can pass a custom
+`ureq::Agent` to `Renderer::with_agent` to identify their own application.
 
 HERE images get a visible `(c) HERE` footer. XYZ requires `--attribution`, drawn
 above overlays at the bottom right. Attribution is plain printable ASCII, not

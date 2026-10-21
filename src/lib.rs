@@ -109,7 +109,7 @@ pub enum Basemap {
 }
 
 impl Basemap {
-    fn source(&self) -> Result<Option<(String, String)>> {
+    fn source(&self, tile_size: u32) -> Result<Option<(String, String)>> {
         match self {
             Self::None => Ok(None),
             Self::Here { api_key, style } => {
@@ -133,7 +133,7 @@ impl Basemap {
                     .collect();
                 Ok(Some((
                     format!(
-                        "https://maps.hereapi.com/v3/base/mc/{{z}}/{{x}}/{{y}}/png?apiKey={key}&style={style}"
+                        "https://maps.hereapi.com/v3/base/mc/{{z}}/{{x}}/{{y}}/png?apiKey={key}&style={style}&size={tile_size}"
                     ),
                     "(c) HERE".into(),
                 )))
@@ -339,16 +339,24 @@ pub struct Renderer {
 impl Default for Renderer {
     fn default() -> Self {
         Self {
-            agent: ureq::Agent::new_with_defaults(),
+            agent: ureq::Agent::config_builder()
+                .user_agent(concat!("mapshoot/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .new_agent(),
         }
     }
 }
 
 impl Renderer {
+    /// Use a custom HTTP agent, for example to set a provider-specific User-Agent.
+    pub fn with_agent(agent: ureq::Agent) -> Self {
+        Self { agent }
+    }
+
     /// Render an image in memory. No output is produced if any tile or overlay fails.
     pub fn render(&self, options: &Options) -> Result<Pixmap> {
         let viewport = Viewport::new(options)?;
-        let source = options.basemap.source()?;
+        let source = options.basemap.source(options.tile_size)?;
         let paths = geojson::prepare(options.geojson.as_ref(), &viewport, options.pixel_ratio)?;
         if let Some((_, attribution)) = &source {
             tiles::validate_attribution(attribution, options.width, options.height)?;
@@ -387,17 +395,21 @@ mod tests {
     #[test]
     fn here_templates_encode_credentials_and_include_each_style() {
         for style in HERE_STYLES {
-            let (url, attribution) = Basemap::Here {
+            let here = Basemap::Here {
                 api_key: "a&b /?é".into(),
                 style: (*style).into(),
+            };
+            for tile_size in [256, 512] {
+                let (url, attribution) = here.source(tile_size).unwrap().unwrap();
+                assert!(url.starts_with("https://maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png?"));
+                assert!(url.contains("apiKey=a%26b%20%2F%3F%C3%A9&style="));
+                assert!(
+                    url.ends_with(&format!("style={style}&size={tile_size}")),
+                    "{url}"
+                );
+                assert_eq!(attribution, "(c) HERE");
             }
-            .source()
-            .unwrap()
-            .unwrap();
-            assert!(url.starts_with("https://maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png?"));
-            assert!(url.contains("apiKey=a%26b%20%2F%3F%C3%A9&style="));
-            assert!(url.ends_with(style));
-            assert_eq!(attribution, "(c) HERE");
         }
+        assert!(Basemap::None.source(256).unwrap().is_none());
     }
 }

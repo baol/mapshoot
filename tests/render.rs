@@ -253,12 +253,19 @@ fn malformed_geojson_is_not_silently_ignored() {
     assert!(render(&opts).is_ok());
 }
 
+#[derive(Default)]
+struct Log {
+    paths: Mutex<Vec<String>>,
+    agents: Mutex<Vec<String>>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
 struct Fixture {
     url: String,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
-    paths: Arc<Mutex<Vec<String>>>,
-    max_active: Arc<AtomicUsize>,
+    log: Arc<Log>,
 }
 
 impl Fixture {
@@ -267,23 +274,18 @@ impl Fixture {
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let paths = Arc::new(Mutex::new(Vec::new()));
-        let active = Arc::new(AtomicUsize::new(0));
-        let max_active = Arc::new(AtomicUsize::new(0));
+        let log = Arc::new(Log::default());
         let thread = {
             let stop = stop.clone();
-            let paths = paths.clone();
-            let max_active = max_active.clone();
+            let log = log.clone();
             std::thread::spawn(move || {
                 let mut workers = Vec::new();
                 while !stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            let paths = paths.clone();
-                            let active = active.clone();
-                            let max_active = max_active.clone();
+                            let log = log.clone();
                             workers.push(std::thread::spawn(move || {
-                                serve(stream, status, delay, corrupt, &paths, &active, &max_active);
+                                serve(stream, status, delay, corrupt, &log);
                             }));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -301,8 +303,7 @@ impl Fixture {
             url: format!("http://{addr}/{{z}}/{{x}}/{{y}}.png"),
             stop,
             thread: Some(thread),
-            paths,
-            max_active,
+            log,
         }
     }
 
@@ -327,15 +328,7 @@ impl Drop for Fixture {
     }
 }
 
-fn serve(
-    mut stream: TcpStream,
-    status: u16,
-    delay: Duration,
-    corrupt: bool,
-    paths: &Mutex<Vec<String>>,
-    active: &AtomicUsize,
-    max_active: &AtomicUsize,
-) {
+fn serve(mut stream: TcpStream, status: u16, delay: Duration, corrupt: bool, log: &Log) {
     stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -351,9 +344,18 @@ fn serve(
     }
     let text = String::from_utf8(request).unwrap();
     let path = text.split_whitespace().nth(1).unwrap().to_string();
-    paths.lock().unwrap().push(path.clone());
-    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-    max_active.fetch_max(current, Ordering::SeqCst);
+    log.paths.lock().unwrap().push(path.clone());
+    let agent = text
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("user-agent")
+                .then(|| value.trim().to_string())
+        })
+        .unwrap_or_default();
+    log.agents.lock().unwrap().push(agent);
+    let current = log.active.fetch_add(1, Ordering::SeqCst) + 1;
+    log.max_active.fetch_max(current, Ordering::SeqCst);
     std::thread::sleep(delay);
     let mut tile = Pixmap::new(256, 256).unwrap();
     let parts: Vec<_> = path.split('/').collect();
@@ -377,7 +379,7 @@ fn serve(
     let _ = stream
         .write_all(header.as_bytes())
         .and_then(|_| stream.write_all(&body));
-    active.fetch_sub(1, Ordering::SeqCst);
+    log.active.fetch_sub(1, Ordering::SeqCst);
 }
 
 #[test]
@@ -390,13 +392,21 @@ fn tiles_are_stitched_at_correct_positions_with_bounded_concurrency() {
     assert_eq!(rgb(&image, 300, 10), [100, 0, 50]);
     assert_eq!(rgb(&image, 10, 300), [0, 100, 50]);
     assert_eq!(rgb(&image, 300, 300), [100, 100, 50]);
-    let mut paths = server.paths.lock().unwrap().clone();
+    let mut paths = server.log.paths.lock().unwrap().clone();
     paths.sort();
     assert_eq!(
         paths,
         ["/1/0/0.png", "/1/0/1.png", "/1/1/0.png", "/1/1/1.png"]
     );
-    assert_eq!(server.max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(server.log.max_active.load(Ordering::SeqCst), 2);
+    let agents = server.log.agents.lock().unwrap().clone();
+    assert!(!agents.is_empty());
+    assert!(
+        agents
+            .iter()
+            .all(|ua| ua.starts_with(&format!("mapshoot/{}", env!("CARGO_PKG_VERSION")))),
+        "{agents:?}"
+    );
     // Attribution is rendered above overlays, within the final image.
     assert_ne!(rgb(&image, 500, 500), [100, 100, 50]);
 }
@@ -445,6 +455,7 @@ fn world_wrap_and_polar_background_do_not_request_invalid_tiles() {
     assert_eq!(rgb(&image, 256, 10), [221, 221, 221]);
     assert!(
         server
+            .log
             .paths
             .lock()
             .unwrap()
@@ -484,7 +495,7 @@ fn deadline_covers_multiple_batches_not_just_individual_requests() {
     opts.concurrency = 1;
     opts.timeout = Duration::from_millis(100);
     assert!(render(&opts).is_err());
-    assert!(server.paths.lock().unwrap().len() < 4);
+    assert!(server.log.paths.lock().unwrap().len() < 4);
 }
 
 #[test]
@@ -498,7 +509,7 @@ fn invalid_attribution_is_reported_before_network_access() {
         };
         assert!(render(&opts).is_err());
     }
-    assert!(server.paths.lock().unwrap().is_empty());
+    assert!(server.log.paths.lock().unwrap().is_empty());
 }
 
 fn cli(args: &[&str]) -> Output {
