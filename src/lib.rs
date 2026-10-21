@@ -76,9 +76,10 @@ pub(crate) fn error(message: impl Into<String>) -> Error {
 
 /// Coordinates are always longitude, latitude.
 ///
-/// `west > east` describes a box that crosses the antimeridian. Latitudes are
-/// limited to +/-90; the part of a box beyond the Web Mercator limit
-/// (+/-85.05112878) renders against the background color.
+/// `west > east` describes a box that crosses the antimeridian. Longitudes are
+/// limited to -180..180 and latitudes to the Web Mercator range
+/// (-85.05112878..85.05112878), so the whole world is
+/// `-180,-MAX_LATITUDE,180,MAX_LATITUDE`.
 #[derive(Clone, Copy, Debug)]
 pub struct Bounds {
     pub west: f64,
@@ -100,7 +101,7 @@ impl Bounds {
     }
 
     /// Spherical box around a point. The box wraps across the antimeridian and
-    /// is clipped at the poles instead of being rejected.
+    /// is clipped at the Web Mercator limit instead of being rejected.
     pub fn from_center(longitude: f64, latitude: f64, radius: f64) -> Result<Self> {
         coordinate(longitude, latitude)?;
         if !radius.is_finite() || radius <= 0.0 || radius > 1_000_000.0 {
@@ -109,7 +110,7 @@ impl Bounds {
         let angle = radius / 6_371_008.8;
         let dy = angle.to_degrees();
         // Web Mercator cannot show the poles: keep the box inside the
-        // renderable latitude range and let the renderer draw background there.
+        // renderable latitude range.
         let center = latitude.clamp(-MAX_LATITUDE, MAX_LATITUDE);
         let (west, east) = if latitude.abs() + dy >= 90.0 {
             // A cap containing a pole spans every longitude.
@@ -125,15 +126,69 @@ impl Bounds {
         };
         Self::new(
             west,
-            (center - dy).max(-90.0),
+            (center - dy).max(-MAX_LATITUDE),
             east,
-            (center + dy).min(90.0),
+            (center + dy).min(MAX_LATITUDE),
         )
     }
 
+    /// Box grown by `meters` on every side.
+    ///
+    /// Longitude degrees per metre shrink towards the poles, so the expansion
+    /// uses the edge closest to a pole. Longitudes wrap; latitudes clamp at the
+    /// Web Mercator limit. A buffer that covers every longitude yields the
+    /// whole world.
+    pub fn buffered(self, meters: f64) -> Result<Self> {
+        if !meters.is_finite() || !(0.0..=1_000_000.0).contains(&meters) {
+            return Err(error("buffer must be 0..1000000 meters"));
+        }
+        if meters == 0.0 {
+            return Ok(self);
+        }
+        let angle = meters / 6_371_008.8;
+        let dy = angle.to_degrees();
+        let edge = self.south.abs().max(self.north.abs()).to_radians().cos();
+        let dx = (dy / edge).min(180.0);
+        let span = if self.west > self.east {
+            self.east - self.west + 360.0
+        } else {
+            self.east - self.west
+        };
+        let south = (self.south - dy).max(-MAX_LATITUDE);
+        let north = (self.north + dy).min(MAX_LATITUDE);
+        if span + 2.0 * dx >= 360.0 {
+            return Self::new(-180.0, south, 180.0, north);
+        }
+        Self::new(
+            wrap_longitude(self.west - dx),
+            south,
+            wrap_longitude(self.east + dx),
+            north,
+        )
+    }
+
+    /// Width divided by height of the box in Web Mercator.
+    pub fn aspect(&self) -> f64 {
+        let (west, north) = project(self.west, self.north, 1.0);
+        let (mut east, south) = project(self.east, self.south, 1.0);
+        if self.west > self.east {
+            east += 1.0;
+        }
+        (east - west) / (south - north)
+    }
+
     fn validate(self) -> Result<()> {
-        coordinate(self.west, self.south)?;
-        coordinate(self.east, self.north)?;
+        for (lon, lat) in [(self.west, self.south), (self.east, self.north)] {
+            if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+                return Err(error("bbox longitudes must be finite and within -180..180"));
+            }
+            if !lat.is_finite() || !(-MAX_LATITUDE..=MAX_LATITUDE).contains(&lat) {
+                return Err(error(format!(
+                    "bbox latitudes must be within +/-{MAX_LATITUDE} (the Web Mercator limit); \
+                     use -180,-{MAX_LATITUDE},180,{MAX_LATITUDE} for the whole world"
+                )));
+            }
+        }
         if self.west == self.east {
             return Err(error(
                 "bbox requires west != east; use west > east for a box crossing the antimeridian",

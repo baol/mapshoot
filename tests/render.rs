@@ -36,13 +36,15 @@ fn bounds_radius_and_projection() {
         [0.0, 0.0, 0.0, 1.0],
         [0.0, 1.0, 1.0, 1.0],
         [0.0, 0.0, 1.0, 91.0],
+        [0.0, 0.0, 1.0, 86.0],
         [0.0, 0.0, 181.0, 1.0],
         [180.0, 0.0, -180.0, 1.0],
         [0.0, 0.0, f64::NAN, 1.0],
     ] {
         assert!(Bounds::new(b[0], b[1], b[2], b[3]).is_err(), "{b:?}");
     }
-    // Crossing the antimeridian and reaching a pole are ordinary requests.
+    // Crossing the antimeridian and reaching the Mercator edge are ordinary
+    // requests.
     let crossing = Bounds::new(179.0, -1.0, -179.0, 1.0).unwrap();
     assert!(crossing.west > crossing.east);
     let whole = Bounds::new(-180.0, -1.0, 180.0, 1.0).unwrap();
@@ -53,7 +55,7 @@ fn bounds_radius_and_projection() {
     whole_opts.padding = 0;
     let whole_view = Viewport::new(&whole_opts).unwrap();
     assert_eq!((whole_view.zoom, whole_view.world_size), (1, 512.0));
-    assert!(Bounds::new(0.0, 0.0, 1.0, 86.0).is_ok());
+    assert!(Bounds::new(0.0, 0.0, 1.0, MAX_LATITUDE).is_ok());
     for (lon, lat, radius) in [
         (0.0, 0.0, -1.0),
         (0.0, 0.0, f64::INFINITY),
@@ -69,10 +71,7 @@ fn bounds_radius_and_projection() {
     let wrapped = Bounds::from_center(179.99, 0.0, 10_000.0).unwrap();
     assert!(wrapped.west > wrapped.east, "{wrapped:?}");
     let polar = Bounds::from_center(0.0, 89.0, 10_000.0).unwrap();
-    assert!(
-        polar.north > MAX_LATITUDE && polar.north <= 90.0,
-        "{polar:?}"
-    );
+    assert!((polar.north - MAX_LATITUDE).abs() < 1e-9, "{polar:?}");
     let cap = Bounds::from_center(0.0, 85.0, 1_000_000.0).unwrap();
     assert_eq!((cap.west, cap.east), (-180.0, 180.0));
     let opts = options();
@@ -83,6 +82,58 @@ fn bounds_radius_and_projection() {
     let se = view.point(opts.bounds.east, opts.bounds.south, 1);
     assert!(nw.0 >= 19.0 && nw.1 >= 19.0 && se.0 <= 237.0 && se.1 <= 237.0);
     assert!(view.point(0.0, 0.005, 1).1 < center.1);
+}
+
+#[test]
+fn buffer_expands_wraps_and_clamps() {
+    let b = Bounds::new(10.0, 40.0, 20.0, 50.0).unwrap();
+    let grown = b.buffered(1000.0).unwrap();
+    let dy = (1000.0_f64 / 6_371_008.8).to_degrees();
+    let dx = dy / 50.0_f64.to_radians().cos();
+    assert!((grown.south - (40.0 - dy)).abs() < 1e-9, "{grown:?}");
+    assert!((grown.north - (50.0 + dy)).abs() < 1e-9, "{grown:?}");
+    // Longitude degrees are shorter near the pole: use the poleward edge.
+    assert!((grown.west - (10.0 - dx)).abs() < 1e-9, "{grown:?}");
+    assert!((grown.east - (20.0 + dx)).abs() < 1e-9, "{grown:?}");
+    assert_eq!(b.buffered(0.0).unwrap().west, b.west);
+
+    let crossing = Bounds::new(179.0, -1.0, -179.0, 1.0)
+        .unwrap()
+        .buffered(20_000.0)
+        .unwrap();
+    assert!(crossing.west > crossing.east, "{crossing:?}");
+
+    let polar = Bounds::new(0.0, 80.0, 10.0, 85.0)
+        .unwrap()
+        .buffered(100_000.0)
+        .unwrap();
+    assert_eq!(polar.north, MAX_LATITUDE);
+
+    let world = Bounds::new(-180.0, -10.0, 180.0, 10.0)
+        .unwrap()
+        .buffered(1000.0)
+        .unwrap();
+    assert_eq!((world.west, world.east), (-180.0, 180.0));
+
+    for bad in [-1.0, f64::NAN, f64::INFINITY, 1_000_001.0] {
+        assert!(b.buffered(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn bounds_aspect_is_projected_not_angular() {
+    let square = Bounds::new(-1.0, -1.0, 1.0, 1.0).unwrap();
+    assert!((square.aspect() - 1.0).abs() < 1e-4, "{}", square.aspect());
+    let wide = Bounds::new(-10.0, 40.0, 10.0, 50.0).unwrap();
+    // 20 degrees of longitude are much shorter than 10 degrees of latitude
+    // at 45N once projected.
+    assert!(wide.aspect() > 1.0, "{}", wide.aspect());
+    let crossing = Bounds::new(179.0, -1.0, -179.0, 1.0).unwrap();
+    assert!(
+        (crossing.aspect() - 1.0).abs() < 1e-3,
+        "{}",
+        crossing.aspect()
+    );
 }
 
 #[test]
@@ -938,7 +989,7 @@ fn antimeridian_polygons_stay_in_one_piece() {
 #[test]
 fn polar_views_clip_to_the_mercator_edge() {
     let mut opts = options();
-    opts.bounds = Bounds::new(-10.0, 80.0, 10.0, 89.0).unwrap();
+    opts.bounds = Bounds::new(-10.0, 80.0, 10.0, MAX_LATITUDE).unwrap();
     opts.geojson = Some(json!({"type": "Point", "coordinates": [0.0, 89.5]}));
     opts.style = Style {
         color: "#ff0000".into(),
