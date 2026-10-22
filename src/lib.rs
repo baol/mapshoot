@@ -1,7 +1,12 @@
 #![forbid(unsafe_code)]
 //! Native Web Mercator raster maps. No browser, GUI, or async runtime.
+//!
+//! Tile caching is opt-in through [`Cache`] and [`Renderer::with_cache`].
+mod cache;
 mod geojson;
 mod tiles;
+
+pub use cache::{Cache, DEFAULT_MAX_BYTES, DEFAULT_TTL};
 
 use serde::Deserialize;
 use std::fmt;
@@ -674,8 +679,11 @@ impl Viewport {
 }
 
 /// Reuses HTTP connections across renders. All drawing is CPU-based.
+///
+/// Caching is opt-in for library users; use [`Renderer::with_cache`].
 pub struct Renderer {
     agent: ureq::Agent,
+    cache: Option<Cache>,
 }
 
 impl Default for Renderer {
@@ -685,6 +693,7 @@ impl Default for Renderer {
                 .user_agent(concat!("mapshoot/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .new_agent(),
+            cache: None,
         }
     }
 }
@@ -692,7 +701,13 @@ impl Default for Renderer {
 impl Renderer {
     /// Use a custom HTTP agent, for example to set a provider-specific User-Agent.
     pub fn with_agent(agent: ureq::Agent) -> Self {
-        Self { agent }
+        Self { agent, cache: None }
+    }
+
+    /// Reuse validated tiles from `cache` across renders.
+    pub fn with_cache(mut self, cache: Cache) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Render an image in memory. No output is produced if any tile or overlay fails.
@@ -710,7 +725,15 @@ impl Renderer {
         .ok_or_else(|| Error::new(ErrorKind::Other, "could not allocate output image"))?;
         image.fill(Color::from_rgba8(221, 221, 221, 255));
         if let Some((url, attribution)) = source {
-            tiles::compose(&self.agent, &mut image, &viewport, options, &url).map_err(|err| {
+            tiles::compose(
+                &self.agent,
+                &mut image,
+                &viewport,
+                options,
+                &url,
+                self.cache.as_ref(),
+            )
+            .map_err(|err| {
                 Error::new(
                     err.kind(),
                     format!("{} basemap failed: {err}", options.basemap.name()),

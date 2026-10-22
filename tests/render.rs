@@ -1,5 +1,5 @@
 use mapshoot::{
-    Basemap, Bounds, ErrorKind, MAX_LATITUDE, Options, Renderer, Style, Viewport, render,
+    Basemap, Bounds, Cache, ErrorKind, MAX_LATITUDE, Options, Renderer, Style, Viewport, render,
 };
 use serde_json::json;
 use std::io::{Read, Write};
@@ -957,11 +957,28 @@ fn invalid_attribution_is_reported_before_network_access() {
     assert!(server.log.paths.lock().unwrap().is_empty());
 }
 
+fn test_cache_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "mapshoot-test-cache-{}-{nanos}",
+            std::process::id()
+        ))
+    })
+}
+
+fn command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mapshoot"));
+    command.env("MAPSHOOT_CACHE_DIR", test_cache_dir());
+    command
+}
+
 fn cli(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mapshoot"))
-        .args(args)
-        .output()
-        .unwrap()
+    command().args(args).output().unwrap()
 }
 
 #[test]
@@ -1050,8 +1067,130 @@ fn cli_help_validation_and_png_stdout() {
 }
 
 #[test]
+fn cli_caches_tiles_by_default_and_accepts_cache_flags() {
+    let server = Fixture::new(200, Duration::ZERO, false);
+    let output =
+        std::env::temp_dir().join(format!("mapshoot-cli-cache-{}.png", std::process::id()));
+    let output = output.to_str().unwrap();
+    let args = [
+        "--bbox",
+        "-0.01,-0.01,0.01,0.01",
+        "--basemap",
+        "xyz",
+        "--tile-url",
+        &server.url,
+        "--attribution",
+        "Test",
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--max-zoom",
+        "10",
+        "--output",
+        output,
+    ];
+    let first = cli(&args);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let requests = server.log.paths.lock().unwrap().len();
+    assert!(requests > 0);
+    assert!(Pixmap::decode_png(&std::fs::read(output).unwrap()).is_ok());
+
+    // The shared MAPSHOOT_CACHE_DIR from cli() makes the second render local.
+    let second = cli(&args);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(server.log.paths.lock().unwrap().len(), requests);
+
+    let no_cache = cli(&[args.as_slice(), &["--no-cache"]].concat());
+    assert!(
+        no_cache.status.success(),
+        "{}",
+        String::from_utf8_lossy(&no_cache.stderr)
+    );
+    assert!(server.log.paths.lock().unwrap().len() > requests);
+
+    let dir = cache_test_dir("cli-flags");
+    let explicit = [
+        args.as_slice(),
+        &[
+            "--cache-dir",
+            dir.to_str().unwrap(),
+            "--cache-ttl",
+            "1",
+            "--cache-max-mb",
+            "1",
+        ],
+    ]
+    .concat();
+    let before = server.log.paths.lock().unwrap().len();
+    assert!(cli(&explicit).status.success());
+    assert!(server.log.paths.lock().unwrap().len() > before);
+    let after = server.log.paths.lock().unwrap().len();
+    assert!(cli(&explicit).status.success());
+    assert_eq!(server.log.paths.lock().unwrap().len(), after);
+    assert!(!cache_files(&dir).is_empty());
+
+    std::fs::remove_file(output).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cli_cache_flags_are_validated() {
+    let dir = cache_test_dir("cli-validation");
+    let dir_text = dir.to_str().unwrap();
+    let common = ["--bbox", "0,0,1,1", "--basemap", "none", "-o", "-"];
+    for (extra, message) in [
+        (
+            vec!["--no-cache", "--cache-dir", dir_text],
+            "use either --no-cache or --cache-dir",
+        ),
+        (
+            vec!["--no-cache", "--cache-ttl", "7"],
+            "use either --no-cache or --cache-ttl",
+        ),
+        (
+            vec!["--no-cache", "--cache-max-mb", "512"],
+            "use either --no-cache or --cache-max-mb",
+        ),
+        (vec!["--cache-ttl", "0"], "--cache-ttl must be 1..3650"),
+        (vec!["--cache-ttl", "far"], "--cache-ttl must be whole days"),
+        (
+            vec!["--cache-max-mb", "0"],
+            "--cache-max-mb must be 1..102400",
+        ),
+        (
+            vec!["--cache-max-mb", "far"],
+            "--cache-max-mb must be whole megabytes",
+        ),
+        (vec!["--no-cache=yes"], "--no-cache does not take a value"),
+        (vec!["--cache-dir="], "cache directory must not be empty"),
+    ] {
+        let args = [common.as_slice(), extra.as_slice()].concat();
+        let result = cli(&args);
+        assert!(!result.status.success(), "{extra:?}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(message), "{extra:?}: {stderr}");
+    }
+    let help = cli(&["--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--no-cache"), "{help}");
+    assert!(help.contains("--cache-ttl"), "{help}");
+    assert!(help.contains("--cache-max-mb"), "{help}");
+    assert!(help.contains("MAPSHOOT_CACHE_DIR"), "{help}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cli_missing_here_key_fails_instead_of_producing_a_blank_map() {
-    let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+    let result = command()
         .env_remove("HERE_API_KEY")
         .env_remove("MAPSHOOT_HERE_API_KEY")
         .args(["--bbox", "13.37,52.50,13.44,52.54", "-o", "-"])
@@ -1069,7 +1208,7 @@ fn cli_missing_here_key_fails_instead_of_producing_a_blank_map() {
 fn cli_carto_requires_a_key_and_validates_styles_and_flags() {
     let bbox = ["--bbox", "13.37,52.50,13.44,52.54", "-o", "-"];
 
-    let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+    let result = command()
         .env_remove("CARTO_API_KEY")
         .env_remove("MAPSHOOT_CARTO_API_KEY")
         .args([bbox.as_slice(), &["--basemap", "carto"]].concat())
@@ -1090,7 +1229,7 @@ fn cli_carto_requires_a_key_and_validates_styles_and_flags() {
         ("MAPSHOOT_CARTO_API_KEY", "CARTO_API_KEY"),
         ("CARTO_API_KEY", "MAPSHOOT_CARTO_API_KEY"),
     ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+        let result = command()
             .env_remove("CARTO_API_KEY")
             .env_remove("MAPSHOOT_CARTO_API_KEY")
             .env(variable, "test-key")
@@ -1179,7 +1318,7 @@ fn cli_carto_requires_a_key_and_validates_styles_and_flags() {
 
     // Flag compatibility is checked before provider keys, so a missing CARTO
     // key must not mask the invalid --here-style.
-    let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+    let result = command()
         .env_remove("CARTO_API_KEY")
         .env_remove("MAPSHOOT_CARTO_API_KEY")
         .args([
@@ -1202,7 +1341,7 @@ fn cli_carto_requires_a_key_and_validates_styles_and_flags() {
     );
     assert!(!message.contains("MAPSHOOT_CARTO_API_KEY"), "{message}");
 
-    let result = Command::new(env!("CARGO_BIN_EXE_mapshoot"))
+    let result = command()
         .env_remove("CARTO_API_KEY")
         .env_remove("MAPSHOOT_CARTO_API_KEY")
         .args([
@@ -1771,6 +1910,81 @@ fn renderer_is_reusable_after_errors() {
     invalid.geojson = Some(json!({"type":"Bogus"}));
     assert!(renderer.render(&invalid).is_err());
     assert!(renderer.render(&options()).is_ok());
+}
+
+fn cache_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("png") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+fn cache_test_dir(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "mapshoot-render-cache-{}-{name}-{nanos}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    path
+}
+
+#[test]
+fn renderer_reuses_cached_tiles_and_replaces_corrupt_entries() {
+    let server = Fixture::new(200, Duration::ZERO, false);
+    let dir = cache_test_dir("hits");
+    let opts = server.options();
+    let cache = Cache::at(&dir, Duration::from_secs(3600), 16 * 1024 * 1024).unwrap();
+    let first = Renderer::default().with_cache(cache).render(&opts).unwrap();
+    let requests = server.log.paths.lock().unwrap().len();
+    assert_eq!(requests, 4);
+
+    let cache = Cache::at(&dir, Duration::from_secs(3600), 16 * 1024 * 1024).unwrap();
+    let second = Renderer::default().with_cache(cache).render(&opts).unwrap();
+    assert_eq!(server.log.paths.lock().unwrap().len(), requests);
+    assert_eq!(first.data(), second.data());
+
+    let files = cache_files(&dir);
+    assert_eq!(files.len(), 4);
+    for file in &files {
+        std::fs::write(file, b"not a PNG").unwrap();
+    }
+    let cache = Cache::at(&dir, Duration::from_secs(3600), 16 * 1024 * 1024).unwrap();
+    let third = Renderer::default().with_cache(cache).render(&opts).unwrap();
+    assert_eq!(server.log.paths.lock().unwrap().len(), requests * 2);
+    assert_eq!(first.data(), third.data());
+
+    // The refetched tiles replaced the corrupt entries.
+    let cache = Cache::at(&dir, Duration::from_secs(3600), 16 * 1024 * 1024).unwrap();
+    Renderer::default().with_cache(cache).render(&opts).unwrap();
+    assert_eq!(server.log.paths.lock().unwrap().len(), requests * 2);
+
+    // Cache hits need no network, even when the download deadline is tiny.
+    drop(server);
+    let mut offline = opts;
+    offline.timeout = Duration::from_millis(1);
+    let cache = Cache::at(&dir, Duration::from_secs(3600), 16 * 1024 * 1024).unwrap();
+    let cached = Renderer::default()
+        .with_cache(cache)
+        .render(&offline)
+        .unwrap();
+    assert_eq!(first.data(), cached.data());
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

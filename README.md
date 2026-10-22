@@ -28,7 +28,7 @@ cargo install --path . --locked   # installs into ~/.cargo/bin
 ```
 
 Rust 1.85+ (2024 edition) and a C toolchain are needed to build. Dependencies:
-tiny-skia, ureq (rustls), serde, serde_json, font8x8.
+tiny-skia, ureq (rustls), serde, serde_json, sha2, font8x8.
 
 ## CLI
 
@@ -74,8 +74,8 @@ CARTO styles: `voyager`, `voyager_nolabels`, `voyager_labels_under`, `light_all`
 
 The `MAPSHOOT_*` key takes precedence over the unprefixed name. A missing or
 empty key is an error. OSM uses `tile.openstreetmap.org`, 256 px tiles, and
-defaults to `--max-zoom 19` and `--concurrency 2`; it caches no tiles and fetches
-only those used by the render. CARTO uses 256 px tiles and permits
+defaults to `--max-zoom 19` and `--concurrency 2`; it fetches only the tiles
+used by the render. CARTO uses 256 px tiles and permits
 `--max-zoom` up to 20. OSM and CARTO reject `--tile-size 512`; `here`, `xyz`, and
 `none` accept it. `--basemap none` renders overlays on a `#dddddd` background and
 warns on stderr.
@@ -121,6 +121,10 @@ columns wrap at the world edge, and overlays project into the same space.
 | `--tile-size` | 256; 256 or 512 |
 | `--concurrency` | 8; 1..32 (OSM 2) |
 | `--timeout` | 15000 ms; 1..300000, covers the tile download phase |
+| `--no-cache` | Disable the tile cache |
+| `--cache-dir` | Cache base directory; default is the system cache directory |
+| `--cache-ttl` | 7 days; 1..3650 |
+| `--cache-max-mb` | 512; 1..102400 |
 | `--tile-url` | XYZ only; HTTP(S) URL with `{z}`, `{x}`, `{y}` |
 | `--attribution` | XYZ only; required plain printable ASCII |
 | `--geojson`, `--style` | Overlay data and style file |
@@ -132,6 +136,23 @@ encoding finish before a temporary file is written and renamed over `--output`,
 so failures leave an existing file intact; the output directory must exist. Tile
 errors report coordinates, not URLs. Exit status is 1 on error, and `-o -` treats
 a broken pipe as success.
+
+### Tile cache
+
+The CLI caches validated tiles in the per-user system cache:
+`$XDG_CACHE_HOME/mapshoot/v1` or `~/.cache/mapshoot/v1` on Linux,
+`~/Library/Caches/mapshoot/v1` on macOS, and `%LOCALAPPDATA%\mapshoot\v1` on
+Windows. `--cache-dir` or `MAPSHOOT_CACHE_DIR` replaces the base directory (the
+`mapshoot` part; `v1` is always appended); an empty `MAPSHOOT_CACHE_DIR`
+disables caching. `--no-cache` disables it per run.
+
+Entries expire after 7 days and expired entries are fetched again. The cache is
+capped at 512 MiB and trimmed oldest-first to 90% of the cap. URLs are SHA-256
+hashed, so credentials and query strings never appear in cache paths; cache
+directories and files are created private to the user (0700/0600 on Unix).
+Missing or corrupt entries are refetched, and runtime cache I/O failures are
+ignored. An unusable `--cache-dir` is an error. Expired tiles are not served
+when the network fails.
 
 ### GeoJSON and styling
 
@@ -176,7 +197,10 @@ image.save_png("berlin.png")?;
 ```
 
 `mapshoot::render(&options)` is the one-shot form; `Renderer` reuses HTTP
-connections. `Basemap` also has `None`, `Osm`, `Carto { api_key, style }`, and
+connections. `Renderer::with_cache(cache)` enables persistent tile caching;
+`Cache::system()` uses the defaults above and `Cache::at(path, ttl, max_bytes)`
+accepts custom limits. The one-shot form and `Renderer::default()` do not cache.
+`Basemap` also has `None`, `Osm`, `Carto { api_key, style }`, and
 `Xyz { url, attribution }`; styles are listed in `HERE_STYLES` and
 `CARTO_STYLES`. `height` is `Option<u32>`: `None` follows the bbox aspect,
 `Some(h)` fits the box inside.

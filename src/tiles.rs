@@ -1,4 +1,4 @@
-use crate::{Options, Result, Viewport, error};
+use crate::{Cache, Options, Result, Viewport, error};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use std::collections::HashMap;
 use std::io::Read;
@@ -27,6 +27,7 @@ pub(crate) fn compose(
     view: &Viewport,
     options: &Options,
     url: &str,
+    cache: Option<&Cache>,
 ) -> Result<()> {
     let size = f64::from(options.tile_size);
     let count = 1_i64 << view.zoom;
@@ -84,7 +85,15 @@ pub(crate) fn compose(
                     };
                     let tile = placement.tile;
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        fetch_tile(agent, url, view.zoom, tile, options.tile_size, deadline)
+                        fetch_tile(
+                            agent,
+                            url,
+                            view.zoom,
+                            tile,
+                            options.tile_size,
+                            deadline,
+                            cache,
+                        )
                     }))
                     .unwrap_or_else(|_| Err(failure("tile worker panicked")));
                     // Do not include URLs or HTTP errors: they may contain API keys.
@@ -150,25 +159,34 @@ fn fetch_tile(
     tile: Tile,
     size: u32,
     deadline: Instant,
+    cache: Option<&Cache>,
 ) -> Result<Pixmap> {
+    let tile_url = template
+        .replace("{z}", &zoom.to_string())
+        .replace("{x}", &tile.x.to_string())
+        .replace("{y}", &tile.y.to_string());
+    if let Some(cache) = cache {
+        if let Some(data) = cache.get(&tile_url, size) {
+            match decode_tile(&data, size) {
+                Ok(pixels) => return Ok(pixels),
+                Err(_) => cache.remove(&tile_url, size),
+            }
+        }
+    }
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or_else(|| {
             crate::Error::new(crate::ErrorKind::Timeout, "tile download deadline exceeded")
         })?;
-    let tile_url = template
-        .replace("{z}", &zoom.to_string())
-        .replace("{x}", &tile.x.to_string())
-        .replace("{y}", &tile.y.to_string());
-    fetch(agent, &tile_url, size, remaining)
+    let data = fetch(agent, &tile_url, remaining)?;
+    let pixels = decode_tile(&data, size)?;
+    if let Some(cache) = cache {
+        cache.put(&tile_url, size, &data);
+    }
+    Ok(pixels)
 }
 
-fn fetch(
-    agent: &ureq::Agent,
-    url: &str,
-    size: u32,
-    timeout: std::time::Duration,
-) -> Result<Pixmap> {
+fn fetch(agent: &ureq::Agent, url: &str, timeout: std::time::Duration) -> Result<Vec<u8>> {
     let response = agent
         .get(url)
         .config()
@@ -189,6 +207,10 @@ fn fetch(
     if data.len() > 8 * 1024 * 1024 {
         return Err(failure("tile exceeds 8 MiB"));
     }
+    Ok(data)
+}
+
+fn decode_tile(data: &[u8], size: u32) -> Result<Pixmap> {
     if data.len() < 24
         || &data[..8] != b"\x89PNG\r\n\x1a\n"
         || &data[12..16] != b"IHDR"
@@ -205,7 +227,7 @@ fn fetch(
     {
         return Err(failure(format!("expected a {size}x{size} PNG tile")));
     }
-    Pixmap::decode_png(&data).map_err(|_| failure("invalid PNG tile data"))
+    Pixmap::decode_png(data).map_err(|_| failure("invalid PNG tile data"))
 }
 
 fn http_error(err: ureq::Error) -> crate::Error {

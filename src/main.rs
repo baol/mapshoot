@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use mapshoot::{Basemap, Bounds, Options, Renderer, Style};
+use mapshoot::{Basemap, Bounds, Cache, DEFAULT_MAX_BYTES, DEFAULT_TTL, Options, Renderer, Style};
 use std::{
     collections::BTreeMap,
     io::{ErrorKind, Write},
@@ -50,6 +50,13 @@ Image:
   --max-zoom N              Highest tile zoom 0..22 (default: 20; osm 19, carto 20)
   --concurrency N           Parallel downloads 1..32 (default: 8; osm 2)
   --timeout N               Total download deadline in ms (default: 15000)
+
+Cache:
+  --no-cache                Disable the tile cache
+  --cache-dir PATH          Cache root (default: system cache directory)
+  --cache-ttl DAYS          Freshness lifetime 1..3650 (default: 7)
+  --cache-max-mb MB         Size cap 1..102400 (default: 512)
+  MAPSHOOT_CACHE_DIR overrides the system cache directory; empty disables it.
 
 Overlay and output:
   --geojson FILE            GeoJSON overlay; works with any basemap
@@ -117,10 +124,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--tile-size",
             "--concurrency",
             "--timeout",
+            "--no-cache",
+            "--cache-dir",
+            "--cache-ttl",
+            "--cache-max-mb",
         ]
         .contains(&flag.as_str())
         {
             return Err(format!("unknown option {flag}; use --help").into());
+        }
+        if flag == "--no-cache" {
+            if inline.is_some() {
+                return Err("--no-cache does not take a value".into());
+            }
+            if values.insert(flag, String::new()).is_some() {
+                return Err("duplicate option --no-cache".into());
+            }
+            continue;
         }
         let value = match inline {
             Some(value) => value,
@@ -315,6 +335,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| format!("--timeout must be whole milliseconds, got {timeout:?}"))?,
         );
     }
+    let no_cache = values.contains_key("--no-cache");
+    if no_cache {
+        for flag in ["--cache-dir", "--cache-ttl", "--cache-max-mb"] {
+            if values.contains_key(flag) {
+                return Err(format!("use either --no-cache or {flag}").into());
+            }
+        }
+    }
+    let cache_ttl_days = match values.get("--cache-ttl") {
+        Some(value) => value
+            .parse::<u64>()
+            .map_err(|_| format!("--cache-ttl must be whole days, got {value:?}"))?,
+        None => DEFAULT_TTL.as_secs() / (24 * 60 * 60),
+    };
+    if !(1..=3650).contains(&cache_ttl_days) {
+        return Err("--cache-ttl must be 1..3650 days".into());
+    }
+    let cache_max_mb = match values.get("--cache-max-mb") {
+        Some(value) => value
+            .parse::<u64>()
+            .map_err(|_| format!("--cache-max-mb must be whole megabytes, got {value:?}"))?,
+        None => DEFAULT_MAX_BYTES / (1024 * 1024),
+    };
+    if !(1..=102_400).contains(&cache_max_mb) {
+        return Err("--cache-max-mb must be 1..102400 MB".into());
+    }
     options.geojson = geojson;
     if let Some(file) = values.get("--style") {
         options.style = read_json::<Style>("--style", file)?;
@@ -324,7 +370,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "mapshoot: warning: --basemap none disables map tiles; output contains only overlays on a plain background"
         );
     }
-    let image = Renderer::default().render(&options)?;
+    let cache_ttl = Duration::from_secs(cache_ttl_days * 24 * 60 * 60);
+    let cache_max_bytes = cache_max_mb * 1024 * 1024;
+    let cache = if no_cache {
+        None
+    } else if let Some(path) = values.get("--cache-dir") {
+        Some(
+            Cache::at(path, cache_ttl, cache_max_bytes)
+                .map_err(|err| format!("--cache-dir {path:?}: {err}"))?,
+        )
+    } else {
+        Cache::system_with(cache_ttl, cache_max_bytes)
+    };
+    let mut renderer = Renderer::default();
+    if let Some(cache) = cache {
+        renderer = renderer.with_cache(cache);
+    }
+    let image = renderer.render(&options)?;
     let png = image.encode_png()?;
     if output == "-" {
         let mut stdout = std::io::stdout().lock();
