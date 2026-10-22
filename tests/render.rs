@@ -1236,13 +1236,14 @@ fn cli_help_validation_and_png_stdout() {
     let help_text = String::from_utf8_lossy(&help.stdout);
     assert!(help_text.contains("longitude,latitude"));
     assert!(help_text.contains("here|osm|carto|xyz|none"), "{help_text}");
+    assert!(help_text.contains("Default: osm (no key)"), "{help_text}");
     assert!(help_text.contains("--carto-style"), "{help_text}");
     assert!(help_text.contains("MAPSHOOT_CARTO_API_KEY"), "{help_text}");
     assert!(help_text.contains("MAPSHOOT_HERE_API_KEY"), "{help_text}");
     assert!(help_text.contains("voyager_labels_under"), "{help_text}");
     assert!(help_text.contains("logistics.satellite.day"), "{help_text}");
-    assert!(help_text.contains("osm 19"), "{help_text}");
-    assert!(help_text.contains("osm 2"), "{help_text}");
+    assert!(help_text.contains("default: 19 for osm"), "{help_text}");
+    assert!(help_text.contains("default: 2 for osm"), "{help_text}");
     for args in [
         vec!["--bogus"],
         vec!["--bbox", "0,,1,1", "-o", "-", "--basemap", "none"],
@@ -1441,7 +1442,14 @@ fn cli_missing_here_key_fails_instead_of_producing_a_blank_map() {
     let result = command()
         .env_remove("HERE_API_KEY")
         .env_remove("MAPSHOOT_HERE_API_KEY")
-        .args(["--bbox", "13.37,52.50,13.44,52.54", "-o", "-"])
+        .args([
+            "--bbox",
+            "13.37,52.50,13.44,52.54",
+            "--basemap",
+            "here",
+            "-o",
+            "-",
+        ])
         .output()
         .unwrap();
     assert!(!result.status.success());
@@ -1450,6 +1458,36 @@ fn cli_missing_here_key_fails_instead_of_producing_a_blank_map() {
     assert!(message.contains("MAPSHOOT_HERE_API_KEY"), "{message}");
     assert!(message.contains("HERE_API_KEY"), "{message}");
     assert!(message.contains("--basemap osm"), "{message}");
+}
+
+#[test]
+fn cli_defaults_to_osm_without_a_token() {
+    for (extra, expected) in [
+        (
+            vec!["--max-zoom", "20"],
+            "max-zoom must be 0..19 for the OSM basemap",
+        ),
+        (
+            vec!["--concurrency", "8"],
+            "concurrency must be 1..2 for the OSM basemap",
+        ),
+        (vec!["--tile-size", "512"], "OSM preset serves 256 px tiles"),
+    ] {
+        let result = command()
+            .env_remove("HERE_API_KEY")
+            .env_remove("MAPSHOOT_HERE_API_KEY")
+            .env_remove("CARTO_API_KEY")
+            .env_remove("MAPSHOOT_CARTO_API_KEY")
+            .args(["--bbox", "13.37,52.50,13.44,52.54", "-o", "-"])
+            .args(&extra)
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{extra:?}");
+        assert!(result.stdout.is_empty(), "{extra:?}");
+        let message = String::from_utf8_lossy(&result.stderr);
+        assert!(message.contains(expected), "{extra:?}: {message}");
+        assert!(!message.contains("API_KEY"), "{extra:?}: {message}");
+    }
 }
 
 #[test]

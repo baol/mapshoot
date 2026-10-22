@@ -7,16 +7,15 @@ tiny-skia.
 ![Berlin Mitte in four basemap styles with the same GeoJSON overlay](docs/berlin-basemaps.png)
 
 ```sh
+mapshoot --center 13.405,52.52 --radius 2600 --width 800 --height 450 \
+  --geojson examples/berlin.geojson --style examples/berlin-style.json \
+  --output berlin-osm.png
+
 export MAPSHOOT_HERE_API_KEY='your-key'   # HERE_API_KEY also works
 mapshoot --center 13.405,52.52 --radius 2600 --width 800 --height 450 \
   --basemap here --here-style explore.day \
   --geojson examples/berlin.geojson --style examples/berlin-style.json \
   --output berlin-here.png
-
-mapshoot --center 13.405,52.52 --radius 2600 --width 800 --height 450 \
-  --basemap osm \
-  --geojson examples/berlin.geojson --style examples/berlin-style.json \
-  --output berlin-osm.png
 ```
 
 ## Build
@@ -33,13 +32,13 @@ tiny-skia, ureq (rustls), serde, serde_json, sha2, font8x8.
 ## CLI
 
 ```sh
-# Center and radius, with an overlay:
+# Center and radius, with an overlay (OpenStreetMap default, no key):
 mapshoot --center 13.405,52.52 --radius 1500 \
   --geojson examples/overlay.geojson --style examples/style.json \
   --output berlin.png
 
-# Bbox, OpenStreetMap:
-mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap osm --output berlin-osm.png
+# Bbox, OpenStreetMap default:
+mapshoot --bbox 13.37,52.50,13.44,52.54 --output berlin-osm.png
 
 # CARTO (free key: https://carto.com/basemaps/apikey):
 export MAPSHOOT_CARTO_API_KEY='your-key'  # CARTO_API_KEY also works
@@ -59,8 +58,8 @@ mapshoot --geojson examples/overlay.geojson --padding 500 \
 
 | `--basemap` | Provider | Keys (first non-empty) | Style flag |
 |---|---|---|---|
-| `here` (default) | HERE | `MAPSHOOT_HERE_API_KEY`, `HERE_API_KEY` | `--here-style`, default `explore.day` |
-| `osm` | OpenStreetMap | none | none |
+| `osm` (default) | OpenStreetMap | none | none |
+| `here` | HERE | `MAPSHOOT_HERE_API_KEY`, `HERE_API_KEY` | `--here-style`, default `explore.day` |
 | `carto` | CARTO | `MAPSHOOT_CARTO_API_KEY`, `CARTO_API_KEY` | `--carto-style`, default `voyager` |
 | `xyz` | any HTTP(S) XYZ provider | in `--tile-url` | none |
 | `none` | no tiles | none | none |
@@ -72,13 +71,13 @@ HERE styles: `explore.day`, `explore.night`, `explore.satellite.day`, `lite.day`
 CARTO styles: `voyager`, `voyager_nolabels`, `voyager_labels_under`, `light_all`,
 `light_nolabels`, `dark_all`, `dark_nolabels`.
 
-The `MAPSHOOT_*` key takes precedence over the unprefixed name. A missing or
-empty key is an error. OSM uses `tile.openstreetmap.org`, 256 px tiles, and
-defaults to `--max-zoom 19` and `--concurrency 2`; it fetches only the tiles
-used by the render. CARTO uses 256 px tiles and permits
-`--max-zoom` up to 20. OSM and CARTO reject `--tile-size 512`; `here`, `xyz`, and
-`none` accept it. `--basemap none` renders overlays on a `#dddddd` background and
-warns on stderr.
+OSM is the default and needs no key. It uses `tile.openstreetmap.org`, 256 px
+tiles, and defaults to `--max-zoom 19` and `--concurrency 2`; it fetches only the
+tiles used by the render. For HERE and CARTO, the `MAPSHOOT_*` key takes
+precedence over the unprefixed name; a missing or empty key is an error. CARTO
+uses 256 px tiles and permits `--max-zoom` up to 20. OSM and CARTO reject
+`--tile-size 512`; `here`, `xyz`, and `none` accept it. `--basemap none` renders
+overlays on a `#dddddd` background and warns on stderr.
 
 HERE, OSM, and CARTO draw an attribution footer. XYZ requires `--attribution`:
 printable ASCII, validated to fit the image. Requests use
@@ -117,9 +116,9 @@ columns wrap at the world edge, and overlays project into the same space.
 | `--pixel-ratio` | 1; allowed 1..4; multiplies output dimensions |
 | `--buffer` | 0 meters; expands the box; 0..1,000,000 |
 | `--padding` | 0 meters; synonym for `--buffer` |
-| `--max-zoom` | 20; 0..22 (OSM 19, CARTO 20) |
+| `--max-zoom` | 19 (OSM default); 0..22 (here/carto 20) |
 | `--tile-size` | 256; 256 or 512 |
-| `--concurrency` | 8; 1..32 (OSM 2) |
+| `--concurrency` | 2 (OSM default); 1..32 (here/carto 8) |
 | `--timeout` | 15000 ms; 1..300000, covers the tile download phase |
 | `--no-cache` | Disable the tile cache |
 | `--cache-dir` | Cache base directory; default is the system cache directory |

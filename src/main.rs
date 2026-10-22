@@ -14,7 +14,7 @@ Usage: mapshoot --bbox west,south,east,north --output map.png [options]
 
 Basemap:
   --basemap here|osm|carto|xyz|none
-                            Default: here; none disables map tiles
+                            Default: osm (no key); none disables map tiles
   --here-style NAME         HERE only (default: explore.day)
   --carto-style NAME        CARTO only (default: voyager)
   --tile-url URL            XYZ only: HTTP(S) PNG template with {z}, {x}, {y}
@@ -47,8 +47,8 @@ Image:
   --height N                Image height (default: follows the box aspect)
   --aspect-ratio W:H|N      Frame shape; the box is fitted inside
   --pixel-ratio N           Integer output scale 1..4 (default: 1)
-  --max-zoom N              Highest tile zoom 0..22 (default: 20; osm 19, carto 20)
-  --concurrency N           Parallel downloads 1..32 (default: 8; osm 2)
+  --max-zoom N              Highest tile zoom 0..22 (default: 19 for osm, 20 otherwise)
+  --concurrency N           Parallel downloads 1..32 (default: 2 for osm, 8 otherwise)
   --timeout N               Total download deadline in ms (default: 15000)
 
 Cache:
@@ -229,10 +229,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .buffered(margin)
             .map_err(|err| format!("{margin_flag}: {err}"))?;
     }
-    let basemap_name = values
-        .get("--basemap")
-        .map(String::as_str)
-        .unwrap_or("here");
+    let basemap_name = values.get("--basemap").map(String::as_str).unwrap_or("osm");
     if !["here", "osm", "carto", "xyz", "none"].contains(&basemap_name) {
         return Err("--basemap must be here, osm, carto, xyz or none".into());
     }
