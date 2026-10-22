@@ -1,22 +1,247 @@
 use crate::{MAX_LATITUDE, Result, Style, Viewport, coordinate, error, parse_color};
+use font8x8::{BASIC_FONTS, UnicodeFonts};
 use serde_json::Value;
-use tiny_skia::{FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{
+    Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform,
+};
 
 pub(crate) enum Shape {
-    Point(f32, f32),
-    Path { path: Path, fill: bool },
+    Point {
+        x: f32,
+        y: f32,
+        style: ShapeStyle,
+    },
+    Path {
+        path: Path,
+        fill: bool,
+        style: ShapeStyle,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ShapeStyle {
+    fill: Color,
+    stroke: Color,
+    weight: f32,
+    radius: f32,
+    symbol: Option<char>,
 }
 
 pub(crate) fn prepare(
     value: Option<&Value>,
     viewport: &Viewport,
     ratio: u32,
+    style: &Style,
 ) -> Result<Vec<Shape>> {
+    let base = ShapeStyle {
+        fill: parse_color(
+            style.fill_color.as_deref().unwrap_or(&style.color),
+            style.fill_opacity,
+        )?,
+        stroke: parse_color(&style.color, style.opacity)?,
+        weight: style.weight,
+        radius: style.radius,
+        symbol: None,
+    };
     let mut shapes = Vec::new();
     if let Some(value) = value {
-        visit(value, viewport, ratio, &mut shapes, 0, false)?;
+        Painter {
+            view: viewport,
+            ratio,
+            out: &mut shapes,
+            base,
+        }
+        .visit(value, 0, false, None)?;
     }
     Ok(shapes)
+}
+
+struct Painter<'a> {
+    view: &'a Viewport,
+    ratio: u32,
+    out: &'a mut Vec<Shape>,
+    base: ShapeStyle,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FeatureStyle {
+    marker_color: Option<[u8; 3]>,
+    marker_size: Option<MarkerSize>,
+    marker_symbol: Option<char>,
+    stroke: Option<[u8; 3]>,
+    stroke_opacity: Option<f32>,
+    stroke_width: Option<f32>,
+    fill: Option<[u8; 3]>,
+    fill_opacity: Option<f32>,
+}
+
+#[derive(Clone, Copy)]
+enum MarkerSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl MarkerSize {
+    fn radius(self) -> f32 {
+        match self {
+            Self::Small => 4.0,
+            Self::Medium => 6.0,
+            Self::Large => 9.0,
+        }
+    }
+}
+
+impl FeatureStyle {
+    fn from_feature(feature: &Value) -> Result<Self> {
+        let Some(properties) = feature.get("properties") else {
+            return Ok(Self::default());
+        };
+        if properties.is_null() {
+            return Ok(Self::default());
+        }
+        let properties = properties
+            .as_object()
+            .ok_or_else(|| error("invalid GeoJSON: properties must be an object or null"))?;
+        let mut style = Self::default();
+        for (key, value) in properties {
+            if value.is_null() {
+                continue;
+            }
+            match key.as_str() {
+                "marker-color" => style.marker_color = Some(color_property(key, value)?),
+                "marker-size" => {
+                    let size = value.as_str().ok_or_else(|| {
+                        error("properties.marker-size must be small, medium, or large")
+                    })?;
+                    style.marker_size = Some(match size {
+                        "small" => MarkerSize::Small,
+                        "medium" => MarkerSize::Medium,
+                        "large" => MarkerSize::Large,
+                        _ => {
+                            return Err(error(
+                                "properties.marker-size must be small, medium, or large",
+                            ));
+                        }
+                    });
+                }
+                "marker-symbol" => {
+                    let symbol = value
+                        .as_str()
+                        .ok_or_else(|| error("properties.marker-symbol must be a string"))?;
+                    let mut chars = symbol.chars();
+                    style.marker_symbol = match (chars.next(), chars.next()) {
+                        (Some(symbol), None) if symbol.is_ascii_alphanumeric() => Some(symbol),
+                        _ => None,
+                    };
+                }
+                "stroke" => style.stroke = Some(color_property(key, value)?),
+                "stroke-opacity" => {
+                    style.stroke_opacity = Some(number_property(key, value, 0.0, 1.0)?);
+                }
+                "stroke-width" => {
+                    style.stroke_width = Some(number_property(key, value, 0.0, 1024.0)?);
+                }
+                "fill" => style.fill = Some(color_property(key, value)?),
+                "fill-opacity" => {
+                    style.fill_opacity = Some(number_property(key, value, 0.0, 1.0)?);
+                }
+                _ => {}
+            }
+        }
+        Ok(style)
+    }
+
+    fn point(self, base: ShapeStyle) -> ShapeStyle {
+        let mut style = base;
+        if let Some(rgb) = self.marker_color {
+            set_rgb(&mut style.fill, rgb);
+            set_rgb(&mut style.stroke, rgb);
+            // Simplestyle has no marker opacity; markers are solid.
+            style.fill.set_alpha(1.0);
+            style.stroke.set_alpha(1.0);
+        }
+        if let Some(size) = self.marker_size {
+            style.radius = size.radius();
+        }
+        if let Some(symbol) = self.marker_symbol {
+            style.symbol = Some(symbol);
+        }
+        style
+    }
+
+    fn path(self, base: ShapeStyle) -> ShapeStyle {
+        let mut style = base;
+        if let Some(rgb) = self.stroke {
+            set_rgb(&mut style.stroke, rgb);
+        }
+        if let Some(opacity) = self.stroke_opacity {
+            style.stroke.set_alpha(opacity);
+        }
+        if let Some(width) = self.stroke_width {
+            style.weight = width;
+        }
+        if let Some(rgb) = self.fill {
+            set_rgb(&mut style.fill, rgb);
+        }
+        if let Some(opacity) = self.fill_opacity {
+            style.fill.set_alpha(opacity);
+        }
+        style
+    }
+}
+
+fn color_property(key: &str, value: &Value) -> Result<[u8; 3]> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| error(format!("properties.{key} must be a color string")))?;
+    simple_color(text).map_err(|err| error(format!("properties.{key}: {err}")))
+}
+
+fn number_property(key: &str, value: &Value, min: f32, max: f32) -> Result<f32> {
+    let number = value
+        .as_f64()
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| error(format!("properties.{key} must be a number")))?;
+    if !(f64::from(min)..=f64::from(max)).contains(&number) {
+        return Err(error(format!("properties.{key} must be {min}..{max}")));
+    }
+    Ok(number as f32)
+}
+
+/// Simplestyle colors are `#RGB`, `#RRGGBB`, or the same forms without `#`.
+fn simple_color(text: &str) -> Result<[u8; 3]> {
+    let hex = text.strip_prefix('#').unwrap_or(text);
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(error("colors must be #RGB or #RRGGBB"));
+    }
+    let digit = |index: usize| -> Result<u8> {
+        hex.as_bytes()
+            .get(index)
+            .and_then(|byte| (*byte as char).to_digit(16))
+            .map(|value| value as u8)
+            .ok_or_else(|| error("colors must be #RGB or #RRGGBB"))
+    };
+    match hex.len() {
+        3 => {
+            let r = digit(0)?;
+            let g = digit(1)?;
+            let b = digit(2)?;
+            Ok([r * 17, g * 17, b * 17])
+        }
+        6 => Ok([
+            digit(0)? * 16 + digit(1)?,
+            digit(2)? * 16 + digit(3)?,
+            digit(4)? * 16 + digit(5)?,
+        ]),
+        _ => Err(error("colors must be #RGB or #RRGGBB")),
+    }
+}
+
+fn set_rgb(color: &mut Color, rgb: [u8; 3]) {
+    color.set_red(f32::from(rgb[0]) / 255.0);
+    color.set_green(f32::from(rgb[1]) / 255.0);
+    color.set_blue(f32::from(rgb[2]) / 255.0);
 }
 
 /// Geographic extent of every position in a GeoJSON document.
@@ -242,126 +467,123 @@ fn line(
     Ok(())
 }
 
-fn visit(
-    value: &Value,
-    view: &Viewport,
-    ratio: u32,
-    out: &mut Vec<Shape>,
-    depth: usize,
-    geometry: bool,
-) -> Result<()> {
-    if depth > 64 {
-        return Err(error("GeoJSON nesting exceeds 64 levels"));
-    }
-    let kind = value
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| error("invalid GeoJSON: missing type"))?;
-    match kind {
-        "FeatureCollection" if !geometry => {
-            for feature in array(&value["features"])? {
-                if feature["type"] != "Feature" {
-                    return Err(error("invalid GeoJSON: features must contain Features"));
+impl Painter<'_> {
+    fn visit(
+        &mut self,
+        value: &Value,
+        depth: usize,
+        geometry: bool,
+        feature_style: Option<FeatureStyle>,
+    ) -> Result<()> {
+        if depth > 64 {
+            return Err(error("GeoJSON nesting exceeds 64 levels"));
+        }
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| error("invalid GeoJSON: missing type"))?;
+        match kind {
+            "FeatureCollection" if !geometry => {
+                for feature in array(&value["features"])? {
+                    if feature["type"] != "Feature" {
+                        return Err(error("invalid GeoJSON: features must contain Features"));
+                    }
+                    self.visit(feature, depth + 1, false, None)?;
                 }
-                visit(feature, view, ratio, out, depth + 1, false)?;
             }
-        }
-        "Feature" if !geometry => {
-            let geom = value
-                .get("geometry")
-                .ok_or_else(|| error("invalid GeoJSON: missing geometry"))?;
-            if !geom.is_null() {
-                visit(geom, view, ratio, out, depth + 1, true)?;
-            }
-        }
-        "GeometryCollection" => {
-            for geom in array(&value["geometries"])? {
-                visit(geom, view, ratio, out, depth + 1, true)?;
-            }
-        }
-        "Point" => {
-            let (lon, lat) = position(&value["coordinates"])?;
-            let (x, y) = view.point(lon, lat, ratio);
-            out.push(Shape::Point(x, y));
-        }
-        "MultiPoint" | "MultiLineString" | "MultiPolygon" => {
-            let child = match kind {
-                "MultiPoint" => "Point",
-                "MultiLineString" => "LineString",
-                _ => "Polygon",
-            };
-            for coordinates in array(&value["coordinates"])? {
-                visit(
-                    &serde_json::json!({"type": child, "coordinates": coordinates}),
-                    view,
-                    ratio,
-                    out,
-                    depth + 1,
-                    true,
-                )?;
-            }
-        }
-        "LineString" | "Polygon" => {
-            let mut builder = PathBuilder::new();
-            let coords = &value["coordinates"];
-            if kind == "Polygon" {
-                for ring in array(coords)? {
-                    line(&mut builder, ring, view, ratio, true)?;
+            "Feature" if !geometry => {
+                let style = FeatureStyle::from_feature(value)?;
+                let geom = value
+                    .get("geometry")
+                    .ok_or_else(|| error("invalid GeoJSON: missing geometry"))?;
+                if !geom.is_null() {
+                    self.visit(geom, depth + 1, true, Some(style))?;
                 }
-            } else {
-                line(&mut builder, coords, view, ratio, false)?;
             }
-            if let Some(path) = builder.finish() {
-                out.push(Shape::Path {
-                    path,
-                    fill: kind == "Polygon",
-                });
+            "GeometryCollection" => {
+                for geom in array(&value["geometries"])? {
+                    self.visit(geom, depth + 1, true, feature_style)?;
+                }
+            }
+            "Point" => {
+                let (lon, lat) = position(&value["coordinates"])?;
+                let (x, y) = self.view.point(lon, lat, self.ratio);
+                let style = feature_style.map_or(self.base, |style| style.point(self.base));
+                self.out.push(Shape::Point { x, y, style });
+            }
+            "MultiPoint" | "MultiLineString" | "MultiPolygon" => {
+                let child = match kind {
+                    "MultiPoint" => "Point",
+                    "MultiLineString" => "LineString",
+                    _ => "Polygon",
+                };
+                for coordinates in array(&value["coordinates"])? {
+                    self.visit(
+                        &serde_json::json!({"type": child, "coordinates": coordinates}),
+                        depth + 1,
+                        true,
+                        feature_style,
+                    )?;
+                }
+            }
+            "LineString" | "Polygon" => {
+                let mut builder = PathBuilder::new();
+                let coords = &value["coordinates"];
+                if kind == "Polygon" {
+                    for ring in array(coords)? {
+                        line(&mut builder, ring, self.view, self.ratio, true)?;
+                    }
+                } else {
+                    line(&mut builder, coords, self.view, self.ratio, false)?;
+                }
+                if let Some(path) = builder.finish() {
+                    let style = feature_style.map_or(self.base, |style| style.path(self.base));
+                    self.out.push(Shape::Path {
+                        path,
+                        fill: kind == "Polygon",
+                        style,
+                    });
+                }
+            }
+            _ => {
+                return Err(error(format!(
+                    "unsupported or invalid GeoJSON type: {kind}"
+                )));
             }
         }
-        _ => {
-            return Err(error(format!(
-                "unsupported or invalid GeoJSON type: {kind}"
-            )));
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 pub(crate) fn draw(
     image: &mut Pixmap,
     shapes: Vec<Shape>,
-    style: &Style,
     view: &Viewport,
     ratio: u32,
 ) -> Result<()> {
     let mut fill = Paint::default();
-    fill.set_color(parse_color(
-        style.fill_color.as_deref().unwrap_or(&style.color),
-        style.fill_opacity,
-    )?);
     let mut stroke_paint = Paint::default();
-    stroke_paint.set_color(parse_color(&style.color, style.opacity)?);
-    let stroke = Stroke {
-        width: style.weight * ratio as f32,
-        line_cap: LineCap::Round,
-        line_join: LineJoin::Round,
-        ..Stroke::default()
-    };
     let world = view.world_size * view.scale * f64::from(ratio);
     let width = f64::from(image.width());
     for shape in shapes {
-        let (path, should_fill) = match shape {
-            Shape::Point(x, y) => {
+        let (path, should_fill, style, symbol) = match shape {
+            Shape::Point { x, y, style } => {
                 if style.radius == 0.0 {
                     continue;
                 }
-                (
-                    PathBuilder::from_circle(x, y, style.radius * ratio as f32)
-                        .ok_or_else(|| error("could not build point circle"))?,
-                    true,
-                )
+                let path = PathBuilder::from_circle(x, y, style.radius * ratio as f32)
+                    .ok_or_else(|| error("could not build point circle"))?;
+                (path, true, style, Some((x, y)))
             }
-            Shape::Path { path, fill } => (path, fill),
+            Shape::Path { path, fill, style } => (path, fill, style, None),
+        };
+        fill.set_color(style.fill);
+        stroke_paint.set_color(style.stroke);
+        let stroke = Stroke {
+            width: style.weight * ratio as f32,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Stroke::default()
         };
         // Draw every repetition of the world that overlaps the image, so a
         // shape crossing the antimeridian continues on the other side.
@@ -369,13 +591,67 @@ pub(crate) fn draw(
         let first = ((-f64::from(bounds.right())) / world).ceil() as i64;
         let last = ((width - f64::from(bounds.left())) / world).floor() as i64;
         for copy in first..=last {
-            let transform = Transform::from_translate((copy as f64 * world) as f32, 0.0);
+            let offset = (copy as f64 * world) as f32;
+            let transform = Transform::from_translate(offset, 0.0);
             if should_fill {
                 image.fill_path(&path, &fill, FillRule::EvenOdd, transform, None);
             }
             if style.weight > 0.0 {
                 image.stroke_path(&path, &stroke_paint, &stroke, transform, None);
             }
+            if let Some((x, y)) = symbol {
+                marker_symbol(
+                    image,
+                    style.symbol,
+                    x + offset,
+                    y,
+                    style.radius * ratio as f32,
+                    style.fill,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn marker_symbol(
+    image: &mut Pixmap,
+    symbol: Option<char>,
+    x: f32,
+    y: f32,
+    radius: f32,
+    fill: Color,
+) -> Result<()> {
+    let Some(symbol) = symbol else {
+        return Ok(());
+    };
+    let Some(glyph) = BASIC_FONTS.get(symbol) else {
+        return Ok(());
+    };
+    let cell = ((radius * 2.0) / 10.0).round().max(1.0);
+    let left = x - cell * 4.0;
+    let top = y - cell * 4.0;
+    let luminance = 0.2126 * fill.red() + 0.7152 * fill.green() + 0.0722 * fill.blue();
+    let mut paint = Paint::default();
+    paint.set_color(if luminance < 0.5 {
+        Color::WHITE
+    } else {
+        Color::BLACK
+    });
+    paint.anti_alias = false;
+    for (row, bits) in glyph.iter().enumerate() {
+        for column in 0..8 {
+            if bits & (1 << column) == 0 {
+                continue;
+            }
+            let rect = Rect::from_xywh(
+                left + column as f32 * cell,
+                top + row as f32 * cell,
+                cell,
+                cell,
+            )
+            .ok_or_else(|| error("invalid marker symbol"))?;
+            image.fill_rect(rect, &paint, Transform::identity(), None);
         }
     }
     Ok(())

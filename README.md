@@ -175,10 +175,23 @@ image.
 }
 ```
 
-Colors are `#RRGGBB`, opacities 0..1, widths and radii in logical pixels.
-Defaults: `#3388ff`, weight 3, opacity 1, fillOpacity 0.2, radius 6;
-`fillColor` falls back to `color`. Unknown fields are errors. One style applies
-to all features.
+Global style colors are `#RRGGBB`, opacities 0..1, widths 0..1024 and radii in
+logical pixels. Defaults: `#3388ff`, weight 3, opacity 1, fillOpacity 0.2,
+radius 6; `fillColor` falls back to `color`. Unknown fields are errors.
+
+Features can override the global style with
+[simplestyle](https://github.com/mapbox/simplestyle-spec) properties:
+
+- `marker-color` (solid marker fill and outline), `marker-size` (`small`,
+  `medium`, `large` = 4, 6, 9 px radius), `marker-symbol` (one ASCII letter or
+  digit; other icon IDs are ignored). These apply only to points.
+- `stroke`, `stroke-opacity`, `stroke-width` apply to lines and polygon outlines.
+- `fill`, `fill-opacity` apply to polygon interiors.
+
+Simplestyle colors accept `#RGB`, `#RRGGBB`, and both forms without `#`. Values
+that are not specified keep the global style. `title`, `description`, and
+unknown properties are ignored; invalid values for recognized properties are
+errors. Multi geometries inherit the style of their feature.
 
 ## Library
 

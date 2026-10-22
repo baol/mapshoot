@@ -1,3 +1,4 @@
+use font8x8::UnicodeFonts;
 use mapshoot::{
     Basemap, Bounds, Cache, ErrorKind, MAX_LATITUDE, Options, Renderer, Style, Viewport, render,
 };
@@ -520,6 +521,253 @@ fn point_style_output_and_antialiasing() {
     let png = image.encode_png().unwrap();
     let decoded = Pixmap::decode_png(&png).unwrap();
     assert_eq!(decoded.data(), image.data());
+}
+
+#[test]
+fn simplestyle_feature_marker_color_and_size() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-1.0, -1.0, 1.0, 1.0).unwrap();
+    opts.geojson = Some(json!({
+        "type": "Feature",
+        "properties": {
+            "marker-color": "#f00",
+            "marker-size": "large",
+            "stroke": "#00ff00",
+            "fill": "#0000ff"
+        },
+        "geometry": {"type": "Point", "coordinates": [0, 0]}
+    }));
+    let view = Viewport::new(&opts).unwrap();
+    let image = render(&opts).unwrap();
+    let (x, y) = view.point(0.0, 0.0, 1);
+    let (x, y) = (x as u32, y as u32);
+    assert_eq!(rgb(&image, x, y), [255, 0, 0]);
+    // Large markers use a 9 px radius; stroke and fill do not affect a marker.
+    assert_eq!(rgb(&image, x + 7, y), [255, 0, 0]);
+    assert_eq!(rgb(&image, x + 12, y), [221, 221, 221]);
+}
+
+#[test]
+fn simplestyle_marker_symbol_is_drawn_inside_the_marker() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-1.0, -1.0, 1.0, 1.0).unwrap();
+    opts.geojson = Some(json!({
+        "type": "Feature",
+        "properties": {
+            "marker-color": "#ff0000",
+            "marker-size": "medium",
+            "marker-symbol": "1"
+        },
+        "geometry": {"type": "Point", "coordinates": [0, 0]}
+    }));
+    let view = Viewport::new(&opts).unwrap();
+    let image = render(&opts).unwrap();
+    let (x, y) = view.point(0.0, 0.0, 1);
+    let (x, y) = (x as i32, y as i32);
+    let glyph = font8x8::BASIC_FONTS.get('1').unwrap();
+    let mut bit = None;
+    for (row, bits) in glyph.iter().enumerate() {
+        for column in 0..8_i32 {
+            if bits & (1 << column) == 0 {
+                continue;
+            }
+            let distance = (column - 4).abs() + (row as i32 - 4).abs();
+            if bit.is_none_or(|(_, _, best)| distance < best) {
+                bit = Some((column, row, distance));
+            }
+        }
+    }
+    let (column, row, _) = bit.unwrap();
+    // Medium markers have radius 6, so a font cell is one device pixel.
+    let px = (x - 4 + column) as u32;
+    let py = (y - 4 + row as i32) as u32;
+    assert_eq!(rgb(&image, px, py), [255, 255, 255]);
+}
+
+#[test]
+fn simplestyle_applies_to_multi_geometries() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-2.0, -2.0, 2.0, 2.0).unwrap();
+    opts.geojson = Some(json!({
+        "type": "Feature",
+        "properties": {"marker-color": "#00f", "marker-size": "small"},
+        "geometry": {"type": "MultiPoint", "coordinates": [[-1, -1], [1, 1]]}
+    }));
+    let view = Viewport::new(&opts).unwrap();
+    let image = render(&opts).unwrap();
+    for (longitude, latitude) in [(-1.0, -1.0), (1.0, 1.0)] {
+        let (x, y) = view.point(longitude, latitude, 1);
+        assert_eq!(rgb(&image, x as u32, y as u32), [0, 0, 255]);
+    }
+}
+
+#[test]
+fn simplestyle_feature_styles_lines_and_polygons() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-2.0, -2.0, 2.0, 2.0).unwrap();
+    opts.width = 256;
+    opts.height = Some(256);
+    opts.geojson = Some(json!({
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "stroke": "0f0",
+                    "stroke-width": 5,
+                    "stroke-opacity": 0.5
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[-1.5, 1.5], [1.5, 1.5]]
+                }
+            },
+            {
+                "type": "Feature",
+                "properties": {
+                    "fill": "#f00",
+                    "fill-opacity": 1,
+                    "stroke": "#ff0",
+                    "stroke-width": 0
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [-1.5, -1.5], [1.5, -1.5], [1.5, -0.5],
+                        [-1.5, -0.5], [-1.5, -1.5]
+                    ]]
+                }
+            }
+        ]
+    }));
+    let view = Viewport::new(&opts).unwrap();
+    let image = render(&opts).unwrap();
+    let (x, y) = view.point(0.0, 1.5, 1);
+    let line = rgb(&image, x as u32, y as u32);
+    assert!(line[1] > 230 && line[0] < 130 && line[2] < 130, "{line:?}");
+    let (x, y) = view.point(0.0, -1.0, 1);
+    assert_eq!(rgb(&image, x as u32, y as u32), [255, 0, 0]);
+}
+
+#[test]
+fn simplestyle_unset_properties_keep_the_global_style() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-2.0, -2.0, 2.0, 2.0).unwrap();
+    opts.style = Style {
+        color: "#ff0000".into(),
+        fill_opacity: 1.0,
+        ..Style::default()
+    };
+    opts.geojson = Some(json!({
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"fill": "#0f0"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [-1.5, -1.5], [1.5, -1.5], [1.5, -0.5],
+                        [-1.5, -0.5], [-1.5, -1.5]
+                    ]]
+                }
+            },
+            {
+                "type": "Feature",
+                "properties": {"stroke-opacity": 0.5},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[-1.5, 1.5], [1.5, 1.5]]
+                }
+            }
+        ]
+    }));
+    let view = Viewport::new(&opts).unwrap();
+    let image = render(&opts).unwrap();
+    let (x, y) = view.point(0.0, -1.0, 1);
+    assert_eq!(rgb(&image, x as u32, y as u32), [0, 255, 0]);
+    let (x, y) = view.point(0.0, 1.5, 1);
+    let line = rgb(&image, x as u32, y as u32);
+    assert!(line[0] > 230 && line[1] < 130 && line[2] < 130, "{line:?}");
+}
+
+#[test]
+fn simplestyle_marker_and_path_properties_are_independent() {
+    let mut opts = options();
+    opts.bounds = Bounds::new(-2.0, -2.0, 2.0, 2.0).unwrap();
+    opts.style = Style {
+        color: "#ff0000".into(),
+        fill_opacity: 1.0,
+        weight: 1.0,
+        ..Style::default()
+    };
+    opts.geojson = Some(json!({
+        "type": "Feature",
+        "properties": {
+            "marker-color": "#0f0",
+            "stroke": "#00f",
+            "stroke-width": 9,
+            "fill": "#ff0"
+        },
+        "geometry": {
+            "type": "GeometryCollection",
+            "geometries": [
+                {"type": "Point", "coordinates": [-1, 0]},
+                {"type": "LineString", "coordinates": [[0, -1], [0, 1]]}
+            ]
+        }
+    }));
+    let view = Viewport::new(&opts).unwrap();
+    let image = render(&opts).unwrap();
+    let (x, y) = view.point(-1.0, 0.0, 1);
+    assert_eq!(rgb(&image, x as u32, y as u32), [0, 255, 0]);
+    let (x, y) = view.point(0.0, 0.0, 1);
+    assert_eq!(rgb(&image, x as u32, y as u32), [0, 0, 255]);
+}
+
+#[test]
+fn invalid_simplestyle_properties_are_errors() {
+    for (properties, expected) in [
+        (json!({"marker-size": "huge"}), "marker-size"),
+        (json!({"marker-color": "#12"}), "marker-color"),
+        (json!({"stroke": "blue"}), "stroke"),
+        (json!({"stroke-opacity": 2}), "stroke-opacity"),
+        (json!({"fill-opacity": -0.1}), "fill-opacity"),
+        (json!({"stroke-width": -1}), "stroke-width"),
+        (json!({"stroke-width": 2000}), "stroke-width"),
+        (json!({"marker-symbol": 5}), "marker-symbol"),
+    ] {
+        let mut opts = options();
+        opts.geojson = Some(json!({
+            "type": "Feature",
+            "properties": properties,
+            "geometry": {"type": "Point", "coordinates": [0, 0]}
+        }));
+        let message = render(&opts).unwrap_err().to_string();
+        assert!(message.contains(expected), "{message}");
+        assert!(message.contains("properties."), "{message}");
+    }
+    let mut opts = options();
+    opts.geojson = Some(json!({
+        "type": "Feature",
+        "properties": [],
+        "geometry": {"type": "Point", "coordinates": [0, 0]}
+    }));
+    assert!(render(&opts).is_err());
+    // Null properties and unsupported icon IDs are ignored.
+    for properties in [
+        json!(null),
+        json!({"marker-color": null, "stroke": null}),
+        json!({"marker-symbol": "bus"}),
+    ] {
+        let mut opts = options();
+        opts.geojson = Some(json!({
+            "type": "Feature",
+            "properties": properties,
+            "geometry": {"type": "Point", "coordinates": [0, 0]}
+        }));
+        assert!(render(&opts).is_ok(), "{properties}");
+    }
 }
 
 #[test]

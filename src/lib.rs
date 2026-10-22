@@ -427,6 +427,8 @@ fn encode_query_value(value: &str) -> String {
         .collect()
 }
 
+/// Default overlay style. GeoJSON features can override it with simplestyle
+/// properties.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Style {
@@ -714,7 +716,12 @@ impl Renderer {
     pub fn render(&self, options: &Options) -> Result<Pixmap> {
         let viewport = Viewport::new(options)?;
         let source = options.basemap.source(options.tile_size)?;
-        let paths = geojson::prepare(options.geojson.as_ref(), &viewport, options.pixel_ratio)?;
+        let paths = geojson::prepare(
+            options.geojson.as_ref(),
+            &viewport,
+            options.pixel_ratio,
+            &options.style,
+        )?;
         if let Some((_, attribution)) = &source {
             tiles::validate_attribution(attribution, viewport.width, viewport.height)?;
         }
@@ -739,22 +746,10 @@ impl Renderer {
                     format!("{} basemap failed: {err}", options.basemap.name()),
                 )
             })?;
-            geojson::draw(
-                &mut image,
-                paths,
-                &options.style,
-                &viewport,
-                options.pixel_ratio,
-            )?;
+            geojson::draw(&mut image, paths, &viewport, options.pixel_ratio)?;
             tiles::attribution(&mut image, &attribution, options.pixel_ratio)?;
         } else {
-            geojson::draw(
-                &mut image,
-                paths,
-                &options.style,
-                &viewport,
-                options.pixel_ratio,
-            )?;
+            geojson::draw(&mut image, paths, &viewport, options.pixel_ratio)?;
         }
         Ok(image)
     }
