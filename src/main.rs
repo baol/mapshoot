@@ -40,7 +40,7 @@ Area:
   --padding METERS          Synonym for --buffer (default: 0)
 
   --bbox or --center/--radius may be omitted with --geojson; the box then
-  follows the GeoJSON extent.
+  follows the GeoJSON extent and includes marker and stroke graphics.
 
 Image:
   --width N                 Image width (default: 1024)
@@ -361,6 +361,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     options.geojson = geojson;
     if let Some(file) = values.get("--style") {
         options.style = read_json::<Style>("--style", file)?;
+    }
+    if derived {
+        options
+            .include_geojson_graphics()
+            .map_err(|err| format!("--geojson: {err}"))?;
     }
     if matches!(options.basemap, Basemap::None) {
         eprintln!(

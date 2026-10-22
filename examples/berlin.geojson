@@ -60,8 +60,8 @@
     },
     {
       "type": "Feature",
-      "properties": { "name": "Museum Island" },
-      "geometry": { "type": "Point", "coordinates": [13.3975, 52.5186] }
+      "properties": { "name": "Berlin Cathedral" },
+      "geometry": { "type": "Point", "coordinates": [13.3986, 52.5192] }
     },
     {
       "type": "Feature",

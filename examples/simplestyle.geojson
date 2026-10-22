@@ -1,0 +1,94 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Park",
+        "fill": "#8ecae6",
+        "fill-opacity": 0.7,
+        "stroke": "#023047",
+        "stroke-width": 3
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [13.386, 52.508],
+            [13.398, 52.508],
+            [13.398, 52.516],
+            [13.386, 52.516],
+            [13.386, 52.508]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Route",
+        "stroke": "#fb8500",
+        "stroke-opacity": 0.9,
+        "stroke-width": 6
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [13.384, 52.504],
+          [13.405, 52.515],
+          [13.416, 52.522]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Start",
+        "marker-color": "#e63946",
+        "marker-size": "medium",
+        "marker-symbol": "1"
+      },
+      "geometry": { "type": "Point", "coordinates": [13.384, 52.504] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Museum",
+        "marker-color": "#2a9d8f",
+        "marker-size": "medium",
+        "marker-symbol": "M"
+      },
+      "geometry": { "type": "Point", "coordinates": [13.397, 52.517] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Tower",
+        "marker-color": "#8338ec",
+        "marker-size": "medium",
+        "marker-symbol": "T"
+      },
+      "geometry": { "type": "Point", "coordinates": [13.4094, 52.5208] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Finish",
+        "marker-color": "#ffbe0b",
+        "marker-size": "medium",
+        "marker-symbol": "9"
+      },
+      "geometry": { "type": "Point", "coordinates": [13.416, 52.522] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Gallery",
+        "marker-color": "#ff006e",
+        "marker-size": "medium",
+        "marker-symbol": "G"
+      },
+      "geometry": { "type": "Point", "coordinates": [13.423, 52.506] }
+    }
+  ]
+}

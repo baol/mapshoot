@@ -1,9 +1,15 @@
 use crate::{MAX_LATITUDE, Result, Style, Viewport, coordinate, error, parse_color};
-use font8x8::{BASIC_FONTS, UnicodeFonts};
+use ab_glyph::{Font, FontArc, PxScale};
 use serde_json::Value;
+use std::sync::OnceLock;
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
+
+const MARKER_SYMBOL_SIZE: f32 = 13.0;
+const GRAPHIC_ANTIALIAS: f32 = 1.0;
+const MARKER_FONT_DATA: &[u8] = include_bytes!("../assets/SpaceGrotesk-Regular.ttf");
+static MARKER_FONT: OnceLock<Option<FontArc>> = OnceLock::new();
 
 pub(crate) enum Shape {
     Point {
@@ -56,6 +62,48 @@ pub(crate) fn prepare(
     Ok(shapes)
 }
 
+/// Largest logical-pixel extent of the rendered GeoJSON graphics.
+///
+/// This is the distance from a coordinate position or path centerline to the
+/// outer edge of its marker or stroke, plus one pixel for antialiasing.
+pub(crate) fn graphic_padding(value: &Value, style: &Style) -> Result<f32> {
+    // The viewport only supplies the projected positions; the style extents
+    // do not depend on the frame.
+    let view = Viewport {
+        zoom: 0,
+        world_size: 1.0,
+        scale: 1.0,
+        left: 0.0,
+        top: 0.0,
+        width: 1,
+        height: 1,
+    };
+    let mut padding = 0.0_f32;
+    for shape in prepare(Some(value), &view, 1, style)? {
+        let extent = match shape {
+            Shape::Point { style, .. } => {
+                if style.radius == 0.0 {
+                    0.0
+                } else {
+                    let marker = style.radius + style.weight / 2.0;
+                    if style.symbol.is_some() {
+                        marker.max(MARKER_SYMBOL_SIZE / 2.0)
+                    } else {
+                        marker
+                    }
+                }
+            }
+            Shape::Path { style, .. } => style.weight / 2.0,
+        };
+        padding = padding.max(extent);
+    }
+    Ok(if padding > 0.0 {
+        padding + GRAPHIC_ANTIALIAS
+    } else {
+        0.0
+    })
+}
+
 struct Painter<'a> {
     view: &'a Viewport,
     ratio: u32,
@@ -85,8 +133,8 @@ enum MarkerSize {
 impl MarkerSize {
     fn radius(self) -> f32 {
         match self {
-            Self::Small => 4.0,
-            Self::Medium => 6.0,
+            Self::Small => 5.0,
+            Self::Medium => 7.0,
             Self::Large => 9.0,
         }
     }
@@ -600,14 +648,7 @@ pub(crate) fn draw(
                 image.stroke_path(&path, &stroke_paint, &stroke, transform, None);
             }
             if let Some((x, y)) = symbol {
-                marker_symbol(
-                    image,
-                    style.symbol,
-                    x + offset,
-                    y,
-                    style.radius * ratio as f32,
-                    style.fill,
-                )?;
+                marker_symbol(image, style.symbol, x + offset, y, ratio, style.fill)?;
             }
         }
     }
@@ -619,40 +660,53 @@ fn marker_symbol(
     symbol: Option<char>,
     x: f32,
     y: f32,
-    radius: f32,
+    ratio: u32,
     fill: Color,
 ) -> Result<()> {
     let Some(symbol) = symbol else {
         return Ok(());
     };
-    let Some(glyph) = BASIC_FONTS.get(symbol) else {
+    let Some(font) = MARKER_FONT
+        .get_or_init(|| FontArc::try_from_slice(MARKER_FONT_DATA).ok())
+        .as_ref()
+    else {
+        return Err(error("invalid embedded marker font"));
+    };
+    let glyph = font
+        .glyph_id(symbol)
+        .with_scale(PxScale::from(MARKER_SYMBOL_SIZE * ratio as f32));
+    let Some(outline) = font.outline_glyph(glyph) else {
         return Ok(());
     };
-    let cell = ((radius * 2.0) / 10.0).round().max(1.0);
-    let left = x - cell * 4.0;
-    let top = y - cell * 4.0;
+    let bounds = outline.px_bounds();
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return Ok(());
+    }
+    // Center the visible outline, not the font's layout box: digits and
+    // letters then share the same optical center and cap height.
+    let left = (x - bounds.width() / 2.0).round();
+    let top = (y - bounds.height() / 2.0).round();
     let luminance = 0.2126 * fill.red() + 0.7152 * fill.green() + 0.0722 * fill.blue();
-    let mut paint = Paint::default();
-    paint.set_color(if luminance < 0.5 {
+    let text = if luminance < 0.5 {
         Color::WHITE
     } else {
         Color::BLACK
-    });
-    paint.anti_alias = false;
-    for (row, bits) in glyph.iter().enumerate() {
-        for column in 0..8 {
-            if bits & (1 << column) == 0 {
-                continue;
-            }
-            let rect = Rect::from_xywh(
-                left + column as f32 * cell,
-                top + row as f32 * cell,
-                cell,
-                cell,
-            )
-            .ok_or_else(|| error("invalid marker symbol"))?;
+    };
+    let mut paint = Paint {
+        anti_alias: false,
+        ..Paint::default()
+    };
+    outline.draw(|column, row, coverage| {
+        let coverage = coverage.clamp(0.0, 1.0);
+        if coverage <= 0.0 {
+            return;
+        }
+        let mut color = text;
+        color.set_alpha(coverage);
+        paint.set_color(color);
+        if let Some(rect) = Rect::from_xywh(left + column as f32, top + row as f32, 1.0, 1.0) {
             image.fill_rect(rect, &paint, Transform::identity(), None);
         }
-    }
+    });
     Ok(())
 }

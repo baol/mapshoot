@@ -215,6 +215,68 @@ impl Bounds {
         )
     }
 
+    /// Expand the box in projected space so a graphic that extends `pixels`
+    /// logical pixels from its coordinate or centerline fits inside the frame.
+    fn expanded_by_pixels(self, pixels: f32, width: u32, height: Option<u32>) -> Result<Self> {
+        let pixels = f64::from(pixels);
+        if pixels <= 0.0 {
+            return Ok(self);
+        }
+        let (west, north) = project(self.west, self.north, 1.0);
+        let (mut east, south) = project(self.east, self.south, 1.0);
+        if self.west > self.east {
+            east += 1.0;
+        }
+        let box_width = east - west;
+        let box_height = south - north;
+        let frame_width = f64::from(width);
+        let frame_height = height.map(f64::from);
+        let frame_limit = match frame_height {
+            Some(frame_height) => frame_width.min(frame_height),
+            None => frame_width,
+        };
+        if 2.0 * pixels >= frame_limit {
+            return Err(error("GeoJSON graphics do not fit in the frame"));
+        }
+        let mut pad = 0.0;
+        // Enlarging the box changes the fit scale, which changes how many map
+        // units a pixel covers. Iterate to the fixed point.
+        for _ in 0..16 {
+            let scale = match frame_height {
+                Some(frame_height) => (frame_width / (box_width + 2.0 * pad))
+                    .min(frame_height / (box_height + 2.0 * pad)),
+                None => frame_width / (box_width + 2.0 * pad),
+            };
+            if !(scale.is_finite() && scale > 0.0) {
+                return Err(error("GeoJSON graphics do not fit in the frame"));
+            }
+            let next = pixels / scale;
+            if (next - pad).abs() <= 1e-7 {
+                pad = next;
+                break;
+            }
+            pad = next;
+        }
+        if !pad.is_finite() {
+            return Err(error("GeoJSON graphics do not fit in the frame"));
+        }
+        let west = west - pad;
+        let east = east + pad;
+        let north = (north - pad).clamp(0.0, 1.0);
+        let south = (south + pad).clamp(0.0, 1.0);
+        let north = y_to_latitude(north);
+        let south = y_to_latitude(south);
+        if east - west >= 1.0 {
+            return Self::new(-180.0, south, 180.0, north);
+        }
+        Self::new(
+            wrap_longitude(x_to_longitude(west)),
+            south,
+            wrap_longitude(x_to_longitude(east)),
+            north,
+        )
+    }
+
     /// Width divided by height of the box in Web Mercator.
     pub fn aspect(&self) -> f64 {
         let (west, north) = project(self.west, self.north, 1.0);
@@ -525,6 +587,23 @@ impl Options {
         }
     }
 
+    /// Expand `bounds` so GeoJSON markers and strokes fit inside the frame.
+    ///
+    /// This is useful after deriving bounds from GeoJSON coordinates, which
+    /// would otherwise place markers at the image edge. Call it after setting
+    /// `width`, `height`, `geojson`, and `style`. It is a no-op without a
+    /// GeoJSON document.
+    pub fn include_geojson_graphics(&mut self) -> Result<()> {
+        let Some(value) = self.geojson.as_ref() else {
+            return Ok(());
+        };
+        let padding = geojson::graphic_padding(value, &self.style)?;
+        self.bounds = self
+            .bounds
+            .expanded_by_pixels(padding, self.width, self.height)?;
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         self.bounds.validate()?;
         if !(1..=8192).contains(&self.width) || !(1..=4).contains(&self.pixel_ratio) {
@@ -559,6 +638,18 @@ pub(crate) fn project(lon: f64, lat: f64, world: f64) -> (f64, f64) {
     let x = (lon + 180.0) / 360.0 * world;
     let y = (1.0 - lat.to_radians().tan().asinh() / std::f64::consts::PI) / 2.0 * world;
     (x, y.clamp(0.0, world))
+}
+
+fn x_to_longitude(x: f64) -> f64 {
+    x * 360.0 - 180.0
+}
+
+fn y_to_latitude(y: f64) -> f64 {
+    (std::f64::consts::PI * (1.0 - 2.0 * y))
+        .sinh()
+        .atan()
+        .to_degrees()
+        .clamp(-MAX_LATITUDE, MAX_LATITUDE)
 }
 
 #[derive(Debug)]

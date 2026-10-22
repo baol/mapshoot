@@ -1,4 +1,3 @@
-use font8x8::UnicodeFonts;
 use mapshoot::{
     Basemap, Bounds, Cache, ErrorKind, MAX_LATITUDE, Options, Renderer, Style, Viewport, render,
 };
@@ -127,10 +126,48 @@ fn geojson_bounds_use_the_shortest_arc_and_accept_margins() {
 }
 
 #[test]
+fn geojson_framing_includes_marker_graphics() {
+    let mut opts = options();
+    opts.width = 400;
+    opts.height = None;
+    opts.geojson = Some(json!({
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": {"type": "Point", "coordinates": [0, 0]}
+            },
+            {
+                "type": "Feature",
+                "properties": {"marker-size": "large", "marker-color": "#f00"},
+                "geometry": {"type": "Point", "coordinates": [1, 1]}
+            }
+        ]
+    }));
+    opts.bounds = Bounds::from_geojson(opts.geojson.as_ref().unwrap(), 0.0).unwrap();
+    let coordinates = opts.bounds;
+    opts.include_geojson_graphics().unwrap();
+    assert!(opts.bounds.west < coordinates.west, "{:?}", opts.bounds);
+    assert!(opts.bounds.east > coordinates.east, "{:?}", opts.bounds);
+    assert!(opts.bounds.south < coordinates.south, "{:?}", opts.bounds);
+    assert!(opts.bounds.north > coordinates.north, "{:?}", opts.bounds);
+
+    let view = Viewport::new(&opts).unwrap();
+    let marker = 9.0 + 3.0 / 2.0;
+    let (x, y) = view.point(1.0, 1.0, 1);
+    assert!((view.width as f32 - x - marker).abs() <= 2.0, "{x}, {y}");
+    assert!((y - marker).abs() <= 2.0, "{x}, {y}");
+    let (x, y) = view.point(0.0, 0.0, 1);
+    assert!((x - marker).abs() <= 2.0, "{x}, {y}");
+    assert!((view.height as f32 - y - marker).abs() <= 2.0, "{x}, {y}");
+}
+
+#[test]
 fn cli_derives_bounds_from_geojson_and_applies_padding() {
     let base = [
         "--geojson",
-        "examples/overlay.geojson",
+        "examples/berlin.geojson",
         "--basemap",
         "none",
         "--width",
@@ -156,12 +193,13 @@ fn cli_derives_bounds_from_geojson_and_applies_padding() {
     let padded = Pixmap::decode_png(&result.stdout).unwrap();
 
     let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string("examples/overlay.geojson").unwrap())
-            .unwrap();
+        serde_json::from_str(&std::fs::read_to_string("examples/berlin.geojson").unwrap()).unwrap();
     let mut expected = options();
     expected.bounds = Bounds::from_geojson(&value, 1000.0).unwrap();
     expected.width = 320;
     expected.height = None;
+    expected.geojson = Some(value);
+    expected.include_geojson_graphics().unwrap();
     let view = Viewport::new(&expected).unwrap();
     assert_eq!((padded.width(), padded.height()), (view.width, view.height));
     assert_ne!(padded.height(), plain.height());
@@ -169,7 +207,7 @@ fn cli_derives_bounds_from_geojson_and_applies_padding() {
     // --buffer and --padding are synonyms.
     let by_buffer = cli(&[
         "--geojson",
-        "examples/overlay.geojson",
+        "examples/berlin.geojson",
         "--buffer",
         "500",
         "--basemap",
@@ -181,7 +219,7 @@ fn cli_derives_bounds_from_geojson_and_applies_padding() {
     ]);
     let by_padding = cli(&[
         "--geojson",
-        "examples/overlay.geojson",
+        "examples/berlin.geojson",
         "--padding",
         "500",
         "--basemap",
@@ -197,7 +235,7 @@ fn cli_derives_bounds_from_geojson_and_applies_padding() {
 
     let result = cli(&[
         "--geojson",
-        "examples/overlay.geojson",
+        "examples/berlin.geojson",
         "--buffer",
         "500",
         "--padding",
@@ -248,14 +286,14 @@ fn cli_derives_bounds_from_geojson_and_applies_padding() {
         (
             vec![
                 "--geojson",
-                "examples/overlay.geojson",
+                "examples/berlin.geojson",
                 "--center",
                 "13.4,52.5",
             ],
             "--center requires --radius",
         ),
         (
-            vec!["--geojson", "examples/overlay.geojson", "--radius", "1000"],
+            vec!["--geojson", "examples/berlin.geojson", "--radius", "1000"],
             "--radius requires --center",
         ),
         (vec!["--basemap", "none"], "provide --bbox"),
@@ -269,7 +307,7 @@ fn cli_derives_bounds_from_geojson_and_applies_padding() {
     for value in ["-1", "1000001", "far"] {
         let result = cli(&[
             "--geojson",
-            "examples/overlay.geojson",
+            "examples/berlin.geojson",
             "--padding",
             value,
             "--basemap",
@@ -327,6 +365,36 @@ fn cli_point_geojson_needs_padding_to_frame() {
         String::from_utf8_lossy(&result.stderr)
     );
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn simplestyle_example_renders() {
+    let result = cli(&[
+        "--geojson",
+        "examples/simplestyle.geojson",
+        "--basemap",
+        "none",
+        "--width",
+        "640",
+        "-o",
+        "-",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let image = Pixmap::decode_png(&result.stdout).unwrap();
+    assert_eq!(image.width(), 640);
+    let colors: std::collections::HashSet<_> = image
+        .pixels()
+        .iter()
+        .map(|pixel| {
+            let pixel = pixel.demultiply();
+            (pixel.red(), pixel.green(), pixel.blue())
+        })
+        .collect();
+    assert!(colors.len() > 20, "{} colors", colors.len());
 }
 
 #[test]
@@ -548,40 +616,69 @@ fn simplestyle_feature_marker_color_and_size() {
 }
 
 #[test]
-fn simplestyle_marker_symbol_is_drawn_inside_the_marker() {
+fn simplestyle_marker_symbols_are_consistently_sized_and_centered() {
     let mut opts = options();
-    opts.bounds = Bounds::new(-1.0, -1.0, 1.0, 1.0).unwrap();
-    opts.geojson = Some(json!({
-        "type": "Feature",
-        "properties": {
-            "marker-color": "#ff0000",
-            "marker-size": "medium",
-            "marker-symbol": "1"
-        },
-        "geometry": {"type": "Point", "coordinates": [0, 0]}
-    }));
+    opts.bounds = Bounds::new(-2.0, -2.0, 2.0, 2.0).unwrap();
+    opts.width = 512;
+    opts.height = Some(512);
+    opts.pixel_ratio = 4;
+    let points = [
+        (-1.5, 0.5, "small"),
+        (-0.5, 0.5, "medium"),
+        (0.5, 0.5, "large"),
+    ];
+    let features: Vec<_> = points
+        .iter()
+        .map(|(lon, lat, size)| {
+            json!({
+                "type": "Feature",
+                "properties": {
+                    "marker-color": "#000000",
+                    "marker-size": size,
+                    "marker-symbol": "M"
+                },
+                "geometry": {"type": "Point", "coordinates": [lon, lat]}
+            })
+        })
+        .collect();
+    opts.geojson = Some(json!({"type": "FeatureCollection", "features": features}));
     let view = Viewport::new(&opts).unwrap();
     let image = render(&opts).unwrap();
-    let (x, y) = view.point(0.0, 0.0, 1);
-    let (x, y) = (x as i32, y as i32);
-    let glyph = font8x8::BASIC_FONTS.get('1').unwrap();
-    let mut bit = None;
-    for (row, bits) in glyph.iter().enumerate() {
-        for column in 0..8_i32 {
-            if bits & (1 << column) == 0 {
-                continue;
-            }
-            let distance = (column - 4).abs() + (row as i32 - 4).abs();
-            if bit.is_none_or(|(_, _, best)| distance < best) {
-                bit = Some((column, row, distance));
+    let mut sizes = Vec::new();
+    for (longitude, latitude, _) in points {
+        let (x, y) = view.point(longitude, latitude, 4);
+        let bounds = white_bounds(&image, x, y).expect("white marker symbol");
+        let center_x = (bounds.0 + bounds.2) as f32 / 2.0;
+        let center_y = (bounds.1 + bounds.3) as f32 / 2.0;
+        assert!(
+            (center_x - x).abs() <= 2.0 && (center_y - y).abs() <= 2.0,
+            "{bounds:?} centered at {center_x},{center_y}, marker at {x},{y}"
+        );
+        sizes.push((bounds.2 - bounds.0 + 1, bounds.3 - bounds.1 + 1));
+    }
+    assert_eq!(sizes[0], sizes[1], "{sizes:?}");
+    assert_eq!(sizes[1], sizes[2], "{sizes:?}");
+}
+
+fn white_bounds(image: &Pixmap, x: f32, y: f32) -> Option<(u32, u32, u32, u32)> {
+    let x = x.round() as i32;
+    let y = y.round() as i32;
+    let mut bounds = None;
+    for py in (y - 60).max(0)..=(y + 60).min(image.height() as i32 - 1) {
+        for px in (x - 60).max(0)..=(x + 60).min(image.width() as i32 - 1) {
+            let pixel = image.pixel(px as u32, py as u32)?.demultiply();
+            if pixel.red() > 245 && pixel.green() > 245 && pixel.blue() > 245 {
+                let (left, top, right, bottom) = bounds.unwrap_or((u32::MAX, u32::MAX, 0, 0));
+                bounds = Some((
+                    left.min(px as u32),
+                    top.min(py as u32),
+                    right.max(px as u32),
+                    bottom.max(py as u32),
+                ));
             }
         }
     }
-    let (column, row, _) = bit.unwrap();
-    // Medium markers have radius 6, so a font cell is one device pixel.
-    let px = (x - 4 + column) as u32;
-    let py = (y - 4 + row as i32) as u32;
-    assert_eq!(rgb(&image, px, py), [255, 255, 255]);
+    bounds
 }
 
 #[test]
@@ -1295,9 +1392,9 @@ fn cli_help_validation_and_png_stdout() {
         "--basemap",
         "none",
         "--geojson",
-        "examples/overlay.geojson",
+        "examples/berlin.geojson",
         "--style",
-        "examples/style.json",
+        "examples/berlin-style.json",
         "--width",
         "320",
         "--height",
@@ -2283,7 +2380,7 @@ fn cli_writes_png_and_preserves_existing_file_on_render_failure() {
         "--basemap",
         "none",
         "--geojson",
-        "examples/overlay.geojson",
+        "examples/berlin.geojson",
         "-o",
         path_string,
     ]);

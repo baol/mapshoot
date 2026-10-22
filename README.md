@@ -27,15 +27,19 @@ cargo install --path . --locked   # installs into ~/.cargo/bin
 ```
 
 Rust 1.85+ (2024 edition) and a C toolchain are needed to build. Dependencies:
-tiny-skia, ureq (rustls), serde, serde_json, sha2, font8x8.
+tiny-skia, ureq (rustls), serde, serde_json, sha2, ab_glyph, font8x8.
 
 ## CLI
 
 ```sh
-# Center and radius, with an overlay (OpenStreetMap default, no key):
+# Center and radius, with a styled overlay (OpenStreetMap default, no key):
 mapshoot --center 13.405,52.52 --radius 1500 \
-  --geojson examples/overlay.geojson --style examples/style.json \
+  --geojson examples/berlin.geojson --style examples/berlin-style.json \
   --output berlin.png
+
+# Colorful per-feature simplestyle, bounds from GeoJSON, no --style file:
+mapshoot --geojson examples/simplestyle.geojson \
+  --width 800 --basemap none -o simplestyle.png
 
 # Bbox, OpenStreetMap default:
 mapshoot --bbox 13.37,52.50,13.44,52.54 --output berlin-osm.png
@@ -48,11 +52,10 @@ mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap carto --output carto.png
 mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap xyz \
   --tile-url 'https://tiles.example.com/{z}/{x}/{y}.png' \
   --attribution '(c) Example Maps' --output tiles.png
-
-# GeoJSON extent with a 500 m margin, no tiles:
-mapshoot --geojson examples/overlay.geojson --padding 500 \
-  --basemap none -o - > overlay.png
 ```
+
+`examples/berlin.geojson` pairs with `berlin-style.json` for one global style.
+`examples/simplestyle.geojson` uses only per-feature simplestyle properties.
 
 ### Basemaps
 
@@ -94,8 +97,10 @@ and clamps at the Mercator limit; radius is 0 < r <= 1,000,000 meters.
 
 `--bbox` or `--center`/`--radius` may be omitted when `--geojson` is given: the
 box then covers the GeoJSON positions over the shortest longitude arc and is
-clamped to the Mercator latitude limit. Empty documents and zero-extent data
-such as a single point need `--padding` or `--buffer`.
+clamped to the Mercator latitude limit. It also expands to include the rendered
+markers and stroke widths, so graphics are not clipped at the image edge. Empty
+documents and zero-extent data such as a single point need `--padding` or
+`--buffer`.
 
 The bbox fills the image. Height follows the box aspect ratio in Web Mercator
 unless `--height` or `--aspect-ratio` fixes the frame, in which case the box is
@@ -182,8 +187,9 @@ Features can override the global style with
 [simplestyle](https://github.com/mapbox/simplestyle-spec) properties:
 
 - `marker-color` (solid marker fill and outline), `marker-size` (`small`,
-  `medium`, `large` = 4, 6, 9 px radius), `marker-symbol` (one ASCII letter or
-  digit; other icon IDs are ignored). These apply only to points.
+  `medium`, `large` = 5, 7, 9 px radius), `marker-symbol` (one ASCII letter or
+  digit, drawn at a fixed 13 px size and centered; other icon IDs are ignored).
+  These apply only to points.
 - `stroke`, `stroke-opacity`, `stroke-width` apply to lines and polygon outlines.
 - `fill`, `fill-opacity` apply to polygon interiors.
 
@@ -218,7 +224,9 @@ accepts custom limits. The one-shot form and `Renderer::default()` do not cache.
 `Some(h)` fits the box inside.
 `Bounds` provides `new`, `from_center`, `buffered`, and `aspect`;
 `from_geojson(value, margin)` derives bounds from a GeoJSON document over the
-shortest longitude arc. Errors carry `kind()` — `InvalidInput`, `Http(u16)`,
+shortest longitude arc. `Options::include_geojson_graphics` expands such bounds
+by the marker and stroke extents (the CLI does this automatically). Errors carry
+`kind()` — `InvalidInput`, `Http(u16)`,
 `Network`, `Timeout`, `Other` — and `Debug` output redacts keys and tile URLs.
 
 ## Development
@@ -235,5 +243,6 @@ fixtures.
 ## License
 
 Dual licensed under Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT
-([LICENSE-MIT](LICENSE-MIT)), at your option. The embedded 8x8 bitmap font comes
-from the `font8x8` crate (MIT).
+([LICENSE-MIT](LICENSE-MIT)), at your option. Marker symbols use the embedded
+Space Grotesk font (SIL OFL 1.1); see [assets/OFL.txt](assets/OFL.txt). The
+attribution footer uses the 8x8 bitmap font from the `font8x8` crate (MIT).
