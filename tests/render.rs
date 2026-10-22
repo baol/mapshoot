@@ -89,6 +89,246 @@ fn bounds_radius_and_projection() {
 }
 
 #[test]
+fn geojson_bounds_use_the_shortest_arc_and_accept_margins() {
+    let polygon = json!({
+        "type": "Polygon",
+        "coordinates": [[[10.0, 40.0], [20.0, 40.0], [20.0, 50.0], [10.0, 50.0], [10.0, 40.0]]]
+    });
+    let bounds = Bounds::from_geojson(&polygon, 0.0).unwrap();
+    assert_eq!(
+        (bounds.west, bounds.south, bounds.east, bounds.north),
+        (10.0, 40.0, 20.0, 50.0)
+    );
+
+    // A crossing line frames the 20-degree arc across the antimeridian.
+    let crossing = json!({"type": "LineString", "coordinates": [[170.0, 0.0], [-170.0, 1.0]]});
+    let bounds = Bounds::from_geojson(&crossing, 0.0).unwrap();
+    assert!(bounds.west > bounds.east, "{bounds:?}");
+    assert!((bounds.east - bounds.west + 360.0 - 20.0).abs() < 1e-9);
+
+    // A point has no extent until a margin is added.
+    let point = json!({"type": "Point", "coordinates": [13.405, 52.52]});
+    assert!(Bounds::from_geojson(&point, 0.0).is_err());
+    let padded = Bounds::from_geojson(&point, 1000.0).unwrap();
+    assert!(padded.west < 13.405 && padded.east > 13.405, "{padded:?}");
+    assert!(padded.south < 52.52 && padded.north > 52.52, "{padded:?}");
+
+    for empty in [
+        json!({"type": "FeatureCollection", "features": []}),
+        json!({"type": "Feature", "properties": {}, "geometry": null}),
+        json!({"type": "GeometryCollection", "geometries": []}),
+    ] {
+        assert!(Bounds::from_geojson(&empty, 1000.0).is_err(), "{empty}");
+    }
+    assert!(Bounds::from_geojson(&json!({"type": "Bogus"}), 0.0).is_err());
+    assert!(Bounds::from_geojson(&polygon, -1.0).is_err());
+    assert!(Bounds::from_geojson(&polygon, 1_000_001.0).is_err());
+}
+
+#[test]
+fn cli_derives_bounds_from_geojson_and_applies_padding() {
+    let base = [
+        "--geojson",
+        "examples/overlay.geojson",
+        "--basemap",
+        "none",
+        "--width",
+        "320",
+        "-o",
+        "-",
+    ];
+    let result = cli(&base);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let plain = Pixmap::decode_png(&result.stdout).unwrap();
+    assert_eq!(plain.width(), 320);
+
+    let result = cli(&[base.as_slice(), &["--padding", "1000"]].concat());
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let padded = Pixmap::decode_png(&result.stdout).unwrap();
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string("examples/overlay.geojson").unwrap())
+            .unwrap();
+    let mut expected = options();
+    expected.bounds = Bounds::from_geojson(&value, 1000.0).unwrap();
+    expected.width = 320;
+    expected.height = None;
+    let view = Viewport::new(&expected).unwrap();
+    assert_eq!((padded.width(), padded.height()), (view.width, view.height));
+    assert_ne!(padded.height(), plain.height());
+
+    // --buffer and --padding are synonyms.
+    let by_buffer = cli(&[
+        "--geojson",
+        "examples/overlay.geojson",
+        "--buffer",
+        "500",
+        "--basemap",
+        "none",
+        "--width",
+        "320",
+        "-o",
+        "-",
+    ]);
+    let by_padding = cli(&[
+        "--geojson",
+        "examples/overlay.geojson",
+        "--padding",
+        "500",
+        "--basemap",
+        "none",
+        "--width",
+        "320",
+        "-o",
+        "-",
+    ]);
+    assert!(by_buffer.status.success());
+    assert!(by_padding.status.success());
+    assert_eq!(by_buffer.stdout, by_padding.stdout);
+
+    let result = cli(&[
+        "--geojson",
+        "examples/overlay.geojson",
+        "--buffer",
+        "500",
+        "--padding",
+        "500",
+        "--basemap",
+        "none",
+        "-o",
+        "-",
+    ]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("either --buffer or --padding"),
+        "{message}"
+    );
+
+    // Explicit bounds apply the margin before the frame is derived.
+    let result = cli(&[
+        "--bbox",
+        "0,0,2,1",
+        "--padding",
+        "50000",
+        "--width",
+        "400",
+        "--basemap",
+        "none",
+        "-o",
+        "-",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let image = Pixmap::decode_png(&result.stdout).unwrap();
+    let mut expected = options();
+    expected.bounds = Bounds::new(0.0, 0.0, 2.0, 1.0)
+        .unwrap()
+        .buffered(50_000.0)
+        .unwrap();
+    expected.width = 400;
+    expected.height = None;
+    let view = Viewport::new(&expected).unwrap();
+    assert_eq!((image.width(), image.height()), (view.width, view.height));
+
+    // Explicit bounds still require both --center and --radius.
+    for (args, needle) in [
+        (
+            vec![
+                "--geojson",
+                "examples/overlay.geojson",
+                "--center",
+                "13.4,52.5",
+            ],
+            "--center requires --radius",
+        ),
+        (
+            vec!["--geojson", "examples/overlay.geojson", "--radius", "1000"],
+            "--radius requires --center",
+        ),
+        (vec!["--basemap", "none"], "provide --bbox"),
+    ] {
+        let result = cli(&[args.as_slice(), &["-o", "-"]].concat());
+        assert!(!result.status.success(), "{args:?}");
+        let message = String::from_utf8_lossy(&result.stderr);
+        assert!(message.contains(needle), "{message}");
+    }
+
+    for value in ["-1", "1000001", "far"] {
+        let result = cli(&[
+            "--geojson",
+            "examples/overlay.geojson",
+            "--padding",
+            value,
+            "--basemap",
+            "none",
+            "-o",
+            "-",
+        ]);
+        assert!(!result.status.success(), "{value}");
+        let message = String::from_utf8_lossy(&result.stderr);
+        assert!(message.contains("--padding"), "{message}");
+    }
+}
+
+#[test]
+fn cli_point_geojson_needs_padding_to_frame() {
+    let path = std::env::temp_dir().join(format!("mapshoot-point-{}.geojson", std::process::id()));
+    std::fs::write(&path, r#"{"type":"Point","coordinates":[13.405,52.52]}"#).unwrap();
+    let path = path.to_str().unwrap();
+    let result = cli(&["--geojson", path, "--basemap", "none", "-o", "-"]);
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("no extent"), "{message}");
+    assert!(message.contains("--padding"), "{message}");
+
+    let result = cli(&[
+        "--geojson",
+        path,
+        "--padding",
+        "1000",
+        "--basemap",
+        "none",
+        "-o",
+        "-",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    // A buffer alone can also give a degenerate extent a size.
+    let result = cli(&[
+        "--geojson",
+        path,
+        "--buffer",
+        "1000",
+        "--basemap",
+        "none",
+        "-o",
+        "-",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn buffer_expands_wraps_and_clamps() {
     let b = Bounds::new(10.0, 40.0, 20.0, 50.0).unwrap();
     let grown = b.buffered(1000.0).unwrap();

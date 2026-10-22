@@ -50,9 +50,9 @@ mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap xyz \
   --tile-url 'https://tiles.example.com/{z}/{x}/{y}.png' \
   --attribution '(c) Example Maps' --output tiles.png
 
-# Offline overlay, or PNG on stdout:
-mapshoot --bbox 13.37,52.50,13.44,52.54 --basemap none \
-  --geojson examples/overlay.geojson -o - > overlay.png
+# GeoJSON extent with a 500 m margin, no tiles:
+mapshoot --geojson examples/overlay.geojson --padding 500 \
+  --basemap none -o - > overlay.png
 ```
 
 ### Basemaps
@@ -93,9 +93,15 @@ world is `-180,-85.05112878,180,85.05112878`. `west > east` crosses the
 antimeridian. `--center`/`--radius` builds a spherical box that wraps in longitude
 and clamps at the Mercator limit; radius is 0 < r <= 1,000,000 meters.
 
+`--bbox` or `--center`/`--radius` may be omitted when `--geojson` is given: the
+box then covers the GeoJSON positions over the shortest longitude arc and is
+clamped to the Mercator latitude limit. Empty documents and zero-extent data
+such as a single point need `--padding` or `--buffer`.
+
 The bbox fills the image. Height follows the box aspect ratio in Web Mercator
 unless `--height` or `--aspect-ratio` fixes the frame, in which case the box is
-fitted inside, centered. `--buffer` grows the box on every side before framing.
+fitted inside, centered. `--buffer` grows the box on every side before framing;
+`--padding` is a synonym.
 
 Tiles render at zoom `ceil(log2(scale / tile_size))`, capped at `--max-zoom`;
 device scale 1 uses nearest filtering, every other scale uses bicubic. Tile
@@ -104,11 +110,13 @@ columns wrap at the world edge, and overlays project into the same space.
 | Option | Default / meaning |
 |---|---|
 | `--output`, `-o` | Required `.png` path or `-` for stdout |
+| `--bbox`, `--center`, `--radius` | Area selection; optional when `--geojson` supplies it |
 | `--width` | 1024 pixels; 1..8192 |
 | `--height` | follows the box aspect; explicit height fits the box inside |
 | `--aspect-ratio` | `W:H` or a number; fixes the frame |
 | `--pixel-ratio` | 1; allowed 1..4; multiplies output dimensions |
-| `--buffer` | 0 meters; 0..1,000,000 |
+| `--buffer` | 0 meters; expands the box; 0..1,000,000 |
+| `--padding` | 0 meters; synonym for `--buffer` |
 | `--max-zoom` | 20; 0..22 (OSM 19, CARTO 20) |
 | `--tile-size` | 256; 256 or 512 |
 | `--concurrency` | 8; 1..32 (OSM 2) |
@@ -172,9 +180,10 @@ connections. `Basemap` also has `None`, `Osm`, `Carto { api_key, style }`, and
 `Xyz { url, attribution }`; styles are listed in `HERE_STYLES` and
 `CARTO_STYLES`. `height` is `Option<u32>`: `None` follows the bbox aspect,
 `Some(h)` fits the box inside.
-`Bounds` provides `new`, `from_center`, `buffered`, and `aspect`. Errors carry
-`kind()` — `InvalidInput`, `Http(u16)`, `Network`, `Timeout`, `Other` — and
-`Debug` output redacts keys and tile URLs.
+`Bounds` provides `new`, `from_center`, `buffered`, and `aspect`;
+`from_geojson(value, margin)` derives bounds from a GeoJSON document over the
+shortest longitude arc. Errors carry `kind()` — `InvalidInput`, `Http(u16)`,
+`Network`, `Timeout`, `Other` — and `Debug` output redacts keys and tile URLs.
 
 ## Development
 

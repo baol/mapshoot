@@ -1,4 +1,4 @@
-use crate::{Result, Style, Viewport, coordinate, error, parse_color};
+use crate::{MAX_LATITUDE, Result, Style, Viewport, coordinate, error, parse_color};
 use serde_json::Value;
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
@@ -17,6 +17,151 @@ pub(crate) fn prepare(
         visit(value, viewport, ratio, &mut shapes, 0, false)?;
     }
     Ok(shapes)
+}
+
+/// Geographic extent of every position in a GeoJSON document.
+///
+/// Longitudes use the shortest arc that contains all positions, matching how
+/// lines and polygons are drawn across the antimeridian. Latitude is clamped
+/// to the Web Mercator range.
+pub(crate) fn extent(value: &Value) -> Result<Option<(f64, f64, f64, f64)>> {
+    let mut positions = Vec::new();
+    collect_positions(value, &mut positions, 0)?;
+    if positions.is_empty() {
+        return Ok(None);
+    }
+    let mut south = f64::INFINITY;
+    let mut north = f64::NEG_INFINITY;
+    for &(_, latitude) in &positions {
+        south = south.min(latitude);
+        north = north.max(latitude);
+    }
+    let (west, east) = shortest_arc(&positions);
+    Ok(Some((
+        west,
+        south.clamp(-MAX_LATITUDE, MAX_LATITUDE),
+        east,
+        north.clamp(-MAX_LATITUDE, MAX_LATITUDE),
+    )))
+}
+
+fn collect_positions(value: &Value, out: &mut Vec<(f64, f64)>, depth: usize) -> Result<()> {
+    if depth > 64 {
+        return Err(error("GeoJSON nesting exceeds 64 levels"));
+    }
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| error("invalid GeoJSON: missing type"))?;
+    match kind {
+        "FeatureCollection" => {
+            for feature in array(&value["features"])? {
+                if feature["type"] != "Feature" {
+                    return Err(error("invalid GeoJSON: features must contain Features"));
+                }
+                collect_positions(feature, out, depth + 1)?;
+            }
+        }
+        "Feature" => {
+            let geometry = value
+                .get("geometry")
+                .ok_or_else(|| error("invalid GeoJSON: missing geometry"))?;
+            if !geometry.is_null() {
+                collect_positions(geometry, out, depth + 1)?;
+            }
+        }
+        "GeometryCollection" => {
+            for geometry in array(&value["geometries"])? {
+                collect_positions(geometry, out, depth + 1)?;
+            }
+        }
+        "Point" => out.push(position(&value["coordinates"])?),
+        "MultiPoint" => {
+            for point in array(&value["coordinates"])? {
+                out.push(position(point)?);
+            }
+        }
+        "MultiLineString" => {
+            for line in array(&value["coordinates"])? {
+                collect_line(line, out, false)?;
+            }
+        }
+        "MultiPolygon" => {
+            for polygon in array(&value["coordinates"])? {
+                collect_polygon(polygon, out)?;
+            }
+        }
+        "LineString" => collect_line(&value["coordinates"], out, false)?,
+        "Polygon" => collect_polygon(&value["coordinates"], out)?,
+        _ => {
+            return Err(error(format!(
+                "unsupported or invalid GeoJSON type: {kind}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn collect_line(value: &Value, out: &mut Vec<(f64, f64)>, ring: bool) -> Result<()> {
+    let points = array(value)?;
+    if points.len() < if ring { 4 } else { 2 } {
+        return Err(error(
+            "invalid GeoJSON: lines need 2 positions, rings need 4",
+        ));
+    }
+    let first = position(&points[0])?;
+    if ring {
+        let last = position(points.last().ok_or_else(|| error("empty ring"))?)?;
+        if first.0 != last.0 || first.1 != last.1 {
+            return Err(error("invalid GeoJSON: polygon rings must be closed"));
+        }
+    }
+    out.push(first);
+    for point in &points[1..] {
+        out.push(position(point)?);
+    }
+    Ok(())
+}
+
+fn collect_polygon(value: &Value, out: &mut Vec<(f64, f64)>) -> Result<()> {
+    for ring in array(value)? {
+        collect_line(ring, out, true)?;
+    }
+    Ok(())
+}
+
+/// Smallest longitude interval containing all positions.
+fn shortest_arc(positions: &[(f64, f64)]) -> (f64, f64) {
+    let mut longitudes: Vec<f64> = positions
+        .iter()
+        .map(|&(longitude, _)| longitude.rem_euclid(360.0))
+        .collect();
+    longitudes.sort_by(f64::total_cmp);
+    let mut gap = f64::NEG_INFINITY;
+    let mut start = 0.0;
+    for (index, &longitude) in longitudes.iter().enumerate() {
+        let next = longitudes
+            .get(index + 1)
+            .copied()
+            .unwrap_or(longitudes[0] + 360.0);
+        // Prefer the last of equally wide gaps, which keeps an exact
+        // half-world extent on the non-wrapping side.
+        if next - longitude >= gap {
+            gap = next - longitude;
+            start = next;
+        }
+    }
+    let span = 360.0 - gap;
+    (signed_longitude(start), signed_longitude(start + span))
+}
+
+fn signed_longitude(longitude: f64) -> f64 {
+    let wrapped = longitude.rem_euclid(360.0);
+    if wrapped > 180.0 {
+        wrapped - 360.0
+    } else {
+        wrapped
+    }
 }
 
 fn array(value: &Value) -> Result<&Vec<Value>> {

@@ -10,6 +10,7 @@ use std::{
 const HELP: &str = "\
 Usage: mapshoot --bbox west,south,east,north --output map.png [options]
        mapshoot --center longitude,latitude --radius meters --output map.png
+       mapshoot --geojson file.geojson --output map.png [options]
 
 Basemap:
   --basemap here|osm|carto|xyz|none
@@ -36,6 +37,10 @@ Area:
   --center LON,LAT          Requires --radius; alternative to --bbox
   --radius METERS           Radius around --center, at most 1000000
   --buffer METERS           Expand the box on every side (default: 0)
+  --padding METERS          Synonym for --buffer (default: 0)
+
+  --bbox or --center/--radius may be omitted with --geojson; the box then
+  follows the GeoJSON extent.
 
 Image:
   --width N                 Image width (default: 1024)
@@ -54,7 +59,7 @@ Overlay and output:
   --version                 Show version
 
 Options accept --flag VALUE or --flag=VALUE.
-Radius and buffer are in meters. PNG output only.
+Radius, buffer, and padding are in meters. PNG output only.
 ";
 
 fn main() {
@@ -105,6 +110,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--width",
             "--height",
             "--buffer",
+            "--padding",
             "--aspect-ratio",
             "--pixel-ratio",
             "--max-zoom",
@@ -144,33 +150,65 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if output != "-" && !output.to_ascii_lowercase().ends_with(".png") {
         return Err("only PNG output is supported; use a .png extension or - for stdout".into());
     }
-    let bounds = match (
+    let geojson: Option<serde_json::Value> = match values.get("--geojson") {
+        Some(file) => Some(read_json("--geojson", file)?),
+        None => None,
+    };
+    let buffer_set = values.contains_key("--buffer");
+    let padding_set = values.contains_key("--padding");
+    if buffer_set && padding_set {
+        return Err("use either --buffer or --padding, not both".into());
+    }
+    let margin_flag = if buffer_set { "--buffer" } else { "--padding" };
+    let margin = if buffer_set || padding_set {
+        let value = &values[margin_flag];
+        value
+            .parse::<f64>()
+            .map_err(|_| format!("{margin_flag} must be a number of meters, got {value:?}"))
+    } else {
+        Ok(0.0)
+    }?;
+    if !margin.is_finite() || !(0.0..=1_000_000.0).contains(&margin) {
+        return Err(format!("{margin_flag} must be 0..1000000 meters").into());
+    }
+    let (mut bounds, derived) = match (
         values.get("--bbox"),
         values.get("--center"),
         values.get("--radius"),
     ) {
         (Some(bbox), None, None) => {
             let b = numbers::<4>("--bbox", bbox)?;
-            Bounds::new(b[0], b[1], b[2], b[3])?
+            (Bounds::new(b[0], b[1], b[2], b[3])?, false)
         }
         (None, Some(center), Some(radius)) => {
             let c = numbers::<2>("--center", center)?;
             let radius = radius
                 .parse()
                 .map_err(|_| format!("--radius must be a number of meters, got {radius:?}"))?;
-            Bounds::from_center(c[0], c[1], radius)?
+            (Bounds::from_center(c[0], c[1], radius)?, false)
         }
-        _ => return Err("provide either --bbox or --center with --radius".into()),
+        (Some(_), _, _) => {
+            return Err("provide either --bbox or --center with --radius, not both".into());
+        }
+        (None, Some(_), None) => return Err("--center requires --radius".into()),
+        (None, None, Some(_)) => return Err("--radius requires --center".into()),
+        (None, None, None) => match geojson.as_ref() {
+            Some(value) => (
+                Bounds::from_geojson(value, margin).map_err(|err| {
+                    format!("--geojson: {err}; use --padding, --bbox, or --center/--radius")
+                })?,
+                true,
+            ),
+            None => {
+                return Err("provide --bbox, --center with --radius, or --geojson".into());
+            }
+        },
     };
-    let buffer = match values.get("--buffer") {
-        Some(value) => value
-            .parse::<f64>()
-            .map_err(|_| format!("--buffer must be a number of meters, got {value:?}"))?,
-        None => 0.0,
-    };
-    let bounds = bounds
-        .buffered(buffer)
-        .map_err(|err| format!("--buffer: {err}"))?;
+    if !derived {
+        bounds = bounds
+            .buffered(margin)
+            .map_err(|err| format!("{margin_flag}: {err}"))?;
+    }
     let basemap_name = values
         .get("--basemap")
         .map(String::as_str)
@@ -277,9 +315,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| format!("--timeout must be whole milliseconds, got {timeout:?}"))?,
         );
     }
-    if let Some(file) = values.get("--geojson") {
-        options.geojson = Some(read_json("--geojson", file)?);
-    }
+    options.geojson = geojson;
     if let Some(file) = values.get("--style") {
         options.style = read_json::<Style>("--style", file)?;
     }

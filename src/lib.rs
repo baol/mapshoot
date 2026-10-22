@@ -144,6 +144,37 @@ impl Bounds {
         )
     }
 
+    /// Bounds covering every position in a GeoJSON document, expanded by
+    /// `margin` meters on each side.
+    ///
+    /// Positions use the shortest longitude arc that contains them, matching
+    /// how overlays are drawn across the antimeridian. Latitude is clamped to
+    /// the Web Mercator range. `margin` must be 0..1000000 meters. Returns an
+    /// error when the document has no positions, or when it has no extent and
+    /// `margin` is zero.
+    pub fn from_geojson(value: &serde_json::Value, margin: f64) -> Result<Self> {
+        if !margin.is_finite() || !(0.0..=1_000_000.0).contains(&margin) {
+            return Err(error("margin must be 0..1000000 meters"));
+        }
+        let Some((west, south, east, north)) = geojson::extent(value)? else {
+            return Err(error("GeoJSON contains no coordinates"));
+        };
+        let bounds = Self {
+            west,
+            south,
+            east,
+            north,
+        }
+        .buffered(margin)?;
+        if bounds.west == bounds.east || bounds.south == bounds.north {
+            return Err(error(
+                "GeoJSON bounds have no extent; expand them or provide explicit bounds",
+            ));
+        }
+        bounds.validate()?;
+        Ok(bounds)
+    }
+
     /// Box grown by `meters` on every side.
     ///
     /// Longitude degrees per metre shrink towards the poles, so the expansion
