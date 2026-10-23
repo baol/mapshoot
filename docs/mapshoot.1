@@ -1,0 +1,310 @@
+.\" Man page for mapshoot.
+.TH MAPSHOOT 1 "2026" "mapshoot 0.1.0" "User Commands"
+.SH NAME
+mapshoot \- render Web Mercator map images from online tile providers with GeoJSON overlays
+.SH SYNOPSIS
+.B mapshoot
+.B \-\-bbox
+.I west,south,east,north
+.B \-\-output
+.I map.png
+.RI [ options ]
+.br
+.B mapshoot
+.B \-\-center
+.I longitude,latitude
+.B \-\-radius
+.I meters
+.B \-\-output
+.I map.png
+.RI [ options ]
+.br
+.B mapshoot
+.B \-\-geojson
+.I file.geojson
+.B \-\-output
+.I map.png
+.RI [ options ]
+.SH DESCRIPTION
+.B mapshoot
+renders a PNG map image by fetching raster tiles from an online tile provider
+and compositing a GeoJSON overlay on top of them. Tiles are drawn on the CPU
+with tiny\-skia; no GPU, display server, or browser is required.
+.PP
+The output is a single PNG. An area is chosen either from an explicit bounding
+box, from a center and radius, or is derived automatically from the extent of
+the GeoJSON document. The requested box fills the image; the image height
+follows the box aspect ratio in Web Mercator unless it is fixed explicitly.
+.PP
+Every option accepts either
+.B \-\-flag VALUE
+or
+.BI \-\-flag= VALUE.
+Rendering and PNG encoding complete before the destination is written, via a
+temporary file that is renamed over the output, so a failed run never leaves a
+truncated image behind.
+.SH OPTIONS
+.SS Area
+.TP
+.BI \-\-bbox " \fIwest,south,east,north\fR"
+Bounding box in degrees. Longitudes span \-180..180 and latitudes
+\-85.05112878..85.05112878, so the whole world is
+.BR \-180,\-85.05112878,180,85.05112878 .
+A
+.I west
+greater than
+.I east
+crosses the antimeridian.
+.TP
+.BI \-\-center " \fIlongitude,latitude\fR"
+Center of the area; requires
+.BR \-\-radius .
+Mutually exclusive with
+.BR \-\-bbox .
+.TP
+.BI \-\-radius " \fImeters\fR"
+Radius around
+.BR \-\-center ,
+from 0 (exclusive) to 1000000. The resulting box wraps in longitude and is
+clamped at the Mercator latitude limit.
+.TP
+.BI \-\-buffer " \fImeters\fR"
+Expand the box by this many meters on every side before framing. Default 0.
+.TP
+.BI \-\-padding " \fImeters\fR"
+Synonym for
+.BR \-\-buffer .
+At most one of the two may be given.
+.SS Image
+.TP
+.BI \-\-width " \fIN\fR"
+Image width in pixels, 1..8192. Default 1024.
+.TP
+.BI \-\-height " \fIN\fR"
+Image height in pixels, 1..8192. By default the height follows the box aspect
+ratio; when given, the box is fitted inside the resulting frame and centered.
+.TP
+.BI \-\-aspect\-ratio " \fIW:H\fR"
+Fix the frame shape as a width\-to\-height ratio, either
+.I W:H
+or a plain positive number. One of
+.B \-\-width
+or
+.B \-\-height
+is derived from the other if omitted.
+.TP
+.BI \-\-pixel\-ratio " \fIN\fR"
+Integer output scale, 1..4. Default 1. Multiplies the output dimensions;
+width times height times the square of this value must not exceed 64 megapixels.
+.TP
+.BI \-\-max\-zoom " \fIN\fR"
+Highest tile zoom level, 0..22. Default 19 for
+.BR osm ,
+20 for
+.B here
+and
+.BR carto .
+Tiles are rendered at
+.IR ceil(log2(scale / tile_size)) ,
+capped at this value.
+.TP
+.BI \-\-tile\-size " \fIN\fR"
+Tile edge length, 256 or 512. Default 256.
+.B osm
+and
+.B carto
+accept only 256.
+.TP
+.BI \-\-concurrency " \fIN\fR"
+Parallel tile downloads, 1..32. Default 2 for
+.B osm
+and 8 for
+.B here
+and
+.BR carto .
+.TP
+.BI \-\-timeout " \fIN\fR"
+Total deadline for the tile download phase in milliseconds, 1..300000.
+Default 15000.
+.SS Basemap
+.TP
+.BI \-\-basemap " \fIprovider\fR"
+One of
+.BR here ,
+.BR osm ,
+.BR carto ,
+.BR xyz ,
+or
+.BR none .
+Default
+.BR osm ,
+which needs no API key.
+.B none
+draws overlays on a plain #dddddd background and prints a warning.
+.TP
+.BI \-\-here\-style " \fINAME\fR"
+HERE only. Default
+.BR explore.day .
+See
+.B BASEMAP STYLES
+below.
+.TP
+.BI \-\-carto\-style " \fINAME\fR"
+CARTO only. Default
+.BR voyager .
+See
+.B BASEMAP STYLES
+below.
+.TP
+.BI \-\-tile\-url " \fIURL\fR"
+XYZ only. An HTTP(S) URL template containing the placeholders
+.BR {z} ,
+.BR {x} ,
+and
+.BR {y} .
+Any credentials belong in this URL.
+.TP
+.BI \-\-attribution " \fITEXT\fR"
+XYZ only and required. Plain printable ASCII, validated to fit the image.
+.SS Overlay and output
+.TP
+.BI \-\-geojson " \fIFILE\fR"
+GeoJSON overlay, used with any basemap. Feature, FeatureCollection,
+GeometryCollection, Point, LineString, Polygon and their Multi variants are
+accepted; null geometries and empty collections are allowed, and polygon rings
+must be closed. When neither
+.B \-\-bbox
+nor
+.B \-\-center
+is given, the box is derived from the document over the shortest longitude arc
+and expanded to include markers and stroke widths.
+.TP
+.BI \-\-style " \fIFILE\fR"
+JSON object with global style fields
+.BR color ,
+.BR fillColor ,
+.BR weight ,
+.BR opacity ,
+.BR fillOpacity ,
+and
+.BR radius .
+Colors are #RRGGBB, opacities 0..1, and widths and radii are in logical pixels.
+Unknown fields are an error.
+.TP
+.BI \-\-output ", " \-o " \fIFILE\fR"
+Required. PNG destination path, or
+.B \-
+for standard output. Only PNG output is supported, so the path must end in
+.BR .png
+unless it is
+.BR \- .
+.SS Cache
+.TP
+.B \-\-no\-cache
+Disable the tile cache for this run.
+.TP
+.BI \-\-cache\-dir " \fIPATH\fR"
+Cache base directory. The default is the per\-user system cache directory; the
+version component
+.B v1
+is always appended.
+.TP
+.BI \-\-cache\-ttl " \fIDAYS\fR"
+Freshness lifetime of cached tiles, 1..3650 days. Default 7.
+.TP
+.BI \-\-cache\-max\-mb " \fIMB\fR"
+Cache size cap in megabytes, 1..102400. Default 512. The cache is trimmed
+oldest\-first to 90% of the cap.
+.SS General
+.TP
+.B \-\-help ", " \-h
+Print a usage summary and exit.
+.TP
+.B \-\-version
+Print the version and exit.
+.SH BASEMAP STYLES
+.TP
+.B HERE
+explore.day, explore.night, explore.satellite.day, lite.day, lite.night,
+lite.satellite.day, logistics.day, logistics.night, logistics.satellite.day,
+satellite.day, topo.day, topo.night, dem.
+.TP
+.B CARTO
+voyager, voyager_nolabels, voyager_labels_under, light_all, light_nolabels,
+dark_all, dark_nolabels.
+.SH ENVIRONMENT
+.TP
+.B MAPSHOOT_HERE_API_KEY
+HERE API key. Takes precedence over
+.BR HERE_API_KEY .
+.TP
+.B MAPSHOOT_CARTO_API_KEY
+CARTO API key. Takes precedence over
+.BR CARTO_API_KEY .
+.TP
+.B MAPSHOOT_CACHE_DIR
+Cache base directory, overriding the system default. An empty value disables
+caching. Ignored when
+.B \-\-cache\-dir
+is given.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+An error occurred. With
+.BR "\-o \-" ,
+a broken pipe (for example
+.BR "mapshoot ... | head" )
+is treated as success.
+.SH FILES
+.TP
+.I $XDG_CACHE_HOME/mapshoot/v1
+Default tile cache on Linux.
+.TP
+.I ~/.cache/mapshoot/v1
+Fallback tile cache location on Linux when
+.B XDG_CACHE_HOME
+is unset.
+.TP
+.I ~/Library/Caches/mapshoot/v1
+Default tile cache on macOS.
+.TP
+.I %LOCALAPPDATA%\emapshoot\ev1
+Default tile cache on Windows.
+.SH EXAMPLES
+Render OpenStreetMap with a styled overlay:
+.PP
+.RS 4
+.nf
+mapshoot \-\-center 13.405,52.52 \-\-radius 1500 \\
+  \-\-geojson berlin.geojson \-\-style berlin\-style.json \\
+  \-\-output berlin.png
+.fi
+.RE
+.PP
+Render a bounding box and write PNG bytes to standard output:
+.PP
+.RS 4
+.nf
+mapshoot \-\-bbox 13.37,52.50,13.44,52.54 \-o \- > berlin.png
+.fi
+.RE
+.PP
+Derive the area from the GeoJSON extent, using per\-feature simplestyle colors:
+.PP
+.RS 4
+.nf
+mapshoot \-\-geojson simplestyle.geojson \-\-basemap none \-\-width 800 \-o map.png
+.fi
+.RE
+.SH SEE ALSO
+The project README and the library API at
+.IR https://github.com/baol/mapshoot .
+.SH LICENSE
+Dual licensed under Apache\-2.0 or MIT, at your option. Marker symbols use the
+embedded Space Grotesk font under the SIL Open Font License 1.1; the
+attribution footer uses the 8x8 bitmap font from the
+.B font8x8
+crate (MIT).

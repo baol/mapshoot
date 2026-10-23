@@ -240,6 +240,46 @@ cargo test --locked
 CI runs these on stable Rust (`.github/workflows/ci.yml`). Tests use local HTTP
 fixtures.
 
+## Releases and packaging
+
+Pushing a `v*` tag builds and publishes a GitHub Release via cargo-dist
+(`.github/workflows/release.yml`, configured in `dist-workspace.toml`). Each
+release carries:
+
+- fully static musl tarballs for `x86_64` and `aarch64`, each holding the
+  binary, the README, both license files, and the embedded font's license;
+- macOS tarballs for Intel and Apple Silicon;
+- a `curl | sh` installer;
+- native `.deb`, `.rpm`, and `.apk` packages built from the static binaries;
+- `sha256.sum` and `mapshoot-packages.sha256` checksums, a CycloneDX SBOM, and
+  SLSA build provenance attestations.
+
+The Linux binaries are statically linked against musl and have no runtime
+dependencies, so one tarball runs on glibc distributions and Alpine alike. That
+is why the packages declare no dependencies and there are no separate `-gnu`
+builds.
+
+Packaging lives in `packaging/`:
+
+| Path | Purpose |
+|---|---|
+| `nfpm.yaml` | shared deb/rpm/apk package definition |
+| `build-packages.sh` | builds the packages from the staged musl binaries |
+| `copyright` | Debian machine-readable copyright |
+
+Packages can be built locally too:
+
+```sh
+dist build --target x86_64-unknown-linux-musl
+MAPSHOOT_PACKAGE_TARGETS=x86_64-unknown-linux-musl packaging/build-packages.sh
+```
+
+The `.deb` and `.rpm` install the binary to `/usr/bin/mapshoot`, a man page to
+`/usr/share/man/man1`, and the license files. The `.apk` is unsigned, so
+installing it directly needs `apk add --allow-untrusted ./mapshoot-amd64.apk`.
+Verify a release artifact with `gh attestation verify <file> --repo
+baol/mapshoot`.
+
 ## License
 
 Dual licensed under Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT

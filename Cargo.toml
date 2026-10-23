@@ -8,6 +8,8 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["map", "static-map", "geojson", "tiles", "png"]
 categories = ["command-line-utilities", "graphics", "multimedia::images"]
+repository = "https://github.com/baol/mapshoot"
+homepage = "https://github.com/baol/mapshoot"
 
 [dependencies]
 ab_glyph = "0.2"
@@ -22,3 +24,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 lto = true
 strip = true
 codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
