@@ -1,0 +1,21 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mapshoot
+Upstream-Contact: Mirko Maischberger <mirko.maischberger@gmail.com>
+Source: https://github.com/baol/mapshoot
+
+Files: *
+Copyright: 2026 Mirko Maischberger <mirko.maischberger@gmail.com>
+License: MIT or Apache-2.0
+ This software is dual licensed: you may use it under the terms of either the
+ MIT license or the Apache License 2.0, at your option.
+ .
+ The MIT license text is installed with this package in
+ /usr/share/doc/mapshoot/LICENSE-MIT. The full text of the Apache License 2.0
+ is available on Debian systems in /usr/share/common-licenses/Apache-2.0 and is
+ installed with this package in /usr/share/doc/mapshoot/LICENSE-APACHE.
+
+Files: assets/SpaceGrotesk-Regular.ttf
+Copyright: 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)
+License: OFL-1.1
+ The full text of the SIL Open Font License 1.1 is installed with this package
+ in /usr/share/doc/mapshoot/OFL.txt.

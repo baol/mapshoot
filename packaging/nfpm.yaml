@@ -1,0 +1,72 @@
+# nFPM configuration for mapshoot.
+#
+# Builds .deb, .rpm and .apk packages from the fully static musl binary.
+# Invoked by packaging/build-packages.sh, which supplies ARCH, VERSION and
+# BINDIR in the environment. nFPM always expands ${...} in version/arch; it
+# expands a `contents` entry only when that entry sets `expand: true`.
+#
+#   ARCH     Go architecture name: amd64 or arm64 (nFPM maps these to the
+#            per-format names: amd64/arm64 for deb, x86_64/aarch64 for rpm
+#            and apk).
+#   VERSION  the crate version, e.g. 0.1.0
+#   BINDIR   directory containing the extracted, statically linked binary
+name: mapshoot
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: utils
+priority: optional
+maintainer: Mirko Maischberger <mirko.maischberger@gmail.com>
+vendor: Mirko Maischberger
+homepage: https://github.com/baol/mapshoot
+license: MIT OR Apache-2.0
+description: |
+  Native Web Mercator map images from HERE, OpenStreetMap, CARTO, or XYZ PNG
+  tiles, with GeoJSON overlays.
+  mapshoot fetches raster tiles from an online provider, composites a GeoJSON
+  overlay, and writes a single PNG. Tiles are drawn on the CPU with tiny-skia,
+  so no GPU, display server, or browser is required. The binary is statically
+  linked and has no runtime dependencies.
+
+contents:
+  - src: ${BINDIR}/mapshoot
+    dst: /usr/bin/mapshoot
+    # nFPM only expands ${...} in a content entry when it is opted in.
+    expand: true
+    file_info:
+      mode: 0o755
+
+  - src: docs/mapshoot.1
+    dst: /usr/share/man/man1/mapshoot.1
+    file_info:
+      mode: 0o644
+
+  # Documentation and licenses are installed 0644 regardless of the local umask.
+  - src: README.md
+    dst: /usr/share/doc/mapshoot/README.md
+    file_info:
+      mode: 0o644
+  - src: packaging/copyright
+    dst: /usr/share/doc/mapshoot/copyright
+    file_info:
+      mode: 0o644
+  - src: LICENSE-MIT
+    dst: /usr/share/doc/mapshoot/LICENSE-MIT
+    file_info:
+      mode: 0o644
+  - src: LICENSE-APACHE
+    dst: /usr/share/doc/mapshoot/LICENSE-APACHE
+    file_info:
+      mode: 0o644
+  # OFL 1.1 requires the license text to accompany the embedded marker font.
+  - src: assets/OFL.txt
+    dst: /usr/share/doc/mapshoot/OFL.txt
+    file_info:
+      mode: 0o644
+
+# Dependencies are intentionally empty: the binary is statically linked against
+# musl, so the package has no runtime requirements at all. nFPM never adds any
+# on its own, which keeps the .deb installable on Debian 10+ / Ubuntu 18.04+ and
+# the .rpm installable across Fedora, RHEL, Alma, Rocky and openSUSE. Should a
+# per-format dependency list ever be needed, it goes under an `overrides:` key.
